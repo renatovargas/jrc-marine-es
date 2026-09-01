@@ -917,7 +917,7 @@ write_xlsx(
 
 Geometry lives in `data/gisdata/marine_regions.gpkg` and stays static. The published GeoPackage
 holds one copy of each polygon, with one column per year for landings, resource rent and price.
-That is the grain a map needs. Species, country and fleet belong in the RDS and Excel files, not
+Species, country and fleet belong in the RDS and Excel files, not
 in the geometry. Duplicating the polygons once per year was what made the first export large;
 three separate files, one per metric, would triplicate the geometry for no gain. QGIS users style
 `tonnes_2023`, `rent08_k_eur_2018` or `price08_eur_kg_2023` on the same layer. Nominal rent and
@@ -1145,7 +1145,7 @@ These are decisions carried over from the original script, or deferred so that a
 not force a rewrite.
 
 - **Base year.** Monetary values are currently 2008 euro. The Annual Economic Report uses 2023
-  constant prices. If the client prefers another base, change `base_year` in the parameters chunk
+  constant prices. If JRC prefers another base, change `base_year` in the parameters chunk
   and re-render; do not fold a new deflator into the allocation.
 - **Subsidies on investments.** Operating subsidies (`totdirsub`) sit inside `variable_group ==
   "Income"`, so the Income plus Expenditure filter already captures them. Subsidies on investments
