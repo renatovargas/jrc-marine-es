@@ -1,0 +1,9 @@
+
+/.quarto/
+**/*.quarto_ipynb
+.DS_Store
+
+# Source STECF workbook. 285 MB, too large to version.
+# Regenerate the committed RDS files with data/stecf/stecf_to_rds.R
+data/stecf/*.xlsx
+~$*.xlsx

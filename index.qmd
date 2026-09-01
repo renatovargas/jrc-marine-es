@@ -1,0 +1,5 @@
+---
+title: "JRC Marine ES"
+---
+
+This website describes the processing of data for JRC's Marine Ecosystem Services Provision Environmental Accounting. The [fish provisioning dashboard](dashboards/fish-provisioning/) presents the 2008 to 2023 accounts in 2008 euro.

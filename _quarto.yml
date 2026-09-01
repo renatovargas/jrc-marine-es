@@ -1,0 +1,57 @@
+project:
+  type: website
+  output-dir: docs # Expected by GitHub Pages to render site
+  execute-dir: project # Sets all calculations relative to root to avoid using here::here()
+  resources:
+    - data/outputs/gis/
+    - data/outputs/results/
+  render:
+    # QGIS writes layer metadata sidecars that also use the .qmd extension, and
+    # reference/ holds source material we read but never publish. Both must stay
+    # out of the site or the build fails.
+    - "*.qmd"
+    - "!data/"
+    - "!reference/"
+
+website:
+  title: "JRC Marine ES"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - sidebar:documentation
+      - sidebar:dashboards
+      - href: about.qmd
+        text: About
+  sidebar:
+    - id: documentation
+      title: Documentation
+      style: docked
+      contents:
+      - section: "Methods"
+        contents:
+          - text: "Marine ES Methods"
+            href: documentation/methods/marine-methods/
+          - text: "Marine ES Processing"
+            href: documentation/methods/marine-processing/
+      - section: "Data"
+        contents:
+          - text: "STECF Fleet Segment Data"
+            href: documentation/FS-landings-data/
+    - id: dashboards
+      title: Dashboards
+      style: docked
+      contents:
+        - text: "Fish provisioning"
+          href: dashboards/fish-provisioning/
+
+format:
+  html:
+    theme:
+      - cosmo
+      - brand
+    css: styles.css
+    toc: true
+
+
+

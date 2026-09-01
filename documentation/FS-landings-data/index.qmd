@@ -1,0 +1,270 @@
+---
+title: "STECF Fleet Segment Data"
+subtitle: "From one large workbook to two analysis-ready datasets"
+format: html
+toc: true
+toc-depth: 3
+execute:
+  warning: false
+  message: false
+---
+
+# Why this page exists
+
+The fish provisioning accounts are built from a single Excel workbook published by the Scientific,
+Technical and Economic Committee for Fisheries (STECF). That workbook is 285 MB, which is too large
+to keep under version control and slow to open on most machines. This page records what the
+workbook contains, how we extracted the parts we need, and what the extraction is safe to be used
+for.
+
+The conversion is done once by `data/stecf/stecf_to_rds.R`. Its two outputs are committed to the
+repository; the workbook itself is listed in `.gitignore` and stays on local machines only. Anyone
+who needs to regenerate the RDS files can download the workbook again and rerun the script.
+
+# The source workbook
+
+The file is `STECF_25 07_EU Fleet Economic and Transversal data_fleet segment level.xlsx`, released
+under the 2025 Fleet Economic data call. It holds twelve sheets:
+
+| Sheet | Content |
+|---|---|
+| `NOTES` | Coverage, confidentiality and definitions |
+| `FS data` | Economic and transversal variables at fleet segment level |
+| `pivot fs data` | Excel pivot of the above |
+| `FS_effort by sub-region ` | Effort by fleet segment and FAO sub-region |
+| `pivots_effort by sub-region` | Excel pivot of the above |
+| `FS_landings FAO 2018-2023` | Landings by species and sub-region, 2018 to 2024 |
+| `pivot_landings` | Excel pivot of the above |
+| `FS_landings FAO 2013-2017` | Landings by species and sub-region |
+| `FS_landings FAO 2008-2012` | Landings by species and sub-region |
+| `additional info` | Country codes, gear codes, inflation and interest rates |
+| `codes_species` | FAO ASFIS code, scientific name, common name |
+| `codes__regions_sub-regions` | Sub-region code, FAO area, supra-region |
+
+We extract four of them: the three landings sheets and `FS data`. The pivot sheets are Excel
+artefacts of the same numbers. The effort sheets are not used by the fish provisioning method. The
+three code sheets duplicate lookups we already curate in `data/lookup`, so we leave them where they
+are for now.
+
+::: {.callout-important}
+## The sheet names understate their content
+
+`FS_landings FAO 2018-2023` contains 2024 as well, and `FS data` runs to 2024. The output files are
+therefore named for the years they actually hold, 2008 to 2024, rather than for the sheet labels.
+:::
+
+# What the script does
+
+`data/stecf/stecf_to_rds.R` reads the four sheets, binds the three landings sheets into one table,
+and writes two RDS files into `data/stecf/`. Run it from the project root:
+
+```bash
+Rscript data/stecf/stecf_to_rds.R
+```
+
+It takes about 35 seconds and turns 285 MB of Excel into 18 MB of RDS.
+
+Three design decisions are worth recording.
+
+**Column types are declared, not guessed.** Left to itself, `readxl` infers `cluster_name` as
+logical in the 2018-2023 sheet, where that column happens to be empty, and as text in the other
+two; binding the three together would then fail. The script declares all 24 types by name and
+compares them against the actual header before reading. A future data call that renames or reorders
+a column stops the script with an explicit message rather than producing a quietly wrong table.
+
+**The script converts, it does not clean.** No rows are dropped and no values are recoded. Rows
+where `value` is missing are kept as they appear in the workbook, because a missing value is
+meaningful: it usually indicates that a Member State did not report that variable, or that the
+figure was suppressed for confidentiality. Deciding what to do with them belongs to the analysis,
+not to the format conversion.
+
+**Each row records the sheet it came from.** A `source_sheet` column is added so that any question
+about provenance can be answered from the dataset itself.
+
+# The two datasets
+
+```{r}
+#| label: load
+
+library(dplyr)
+library(tidyr)
+library(gt)
+
+fs_landings <- readRDS("data/stecf/FS_landings_FAO_2008-2024.RDS")
+fs_data <- readRDS("data/stecf/FS_data_2008-2024.RDS")
+```
+
+## `FS_landings_FAO_2008-2024.RDS`
+
+One row per fleet segment, year, species and FAO sub-region. Every observation appears twice, once
+as a live weight in kilograms and once as a value in euro.
+
+```{r}
+#| label: landings-shape
+
+fs_landings |>
+  summarise(
+    rows = n(),
+    years = paste(min(year), max(year), sep = " to "),
+    countries = n_distinct(country_code),
+    species = n_distinct(species_code),
+    sub_regions = n_distinct(sub_reg),
+    .by = source_sheet
+  ) |>
+  gt() |>
+  fmt_number(rows, decimals = 0)
+```
+
+```{r}
+#| label: landings-variables
+
+fs_landings |>
+  count(variable_group, variable_name, variable_code, unit) |>
+  gt() |>
+  fmt_number(n, decimals = 0)
+```
+
+## `FS_data_2008-2024.RDS`
+
+One row per fleet segment, year and economic or transversal variable. There is no species or
+sub-region dimension here; that is the essential difference between the two datasets.
+
+```{r}
+#| label: data-variables
+
+fs_data |>
+  distinct(variable_group, variable_code, variable_name, unit) |>
+  arrange(variable_group, variable_code) |>
+  gt(groupname_col = "variable_group")
+```
+
+## Are they the same data?
+
+They are different tables that overlap in one variable. `FS data` reports the gross value of
+landings for a fleet segment as `totlandginc`; the landings sheets report the same economic concept
+as `totvallandg`, broken down by species and sub-region. The two agree closely without being
+identical.
+
+```{r}
+#| label: spot-check
+
+value_by_year <- bind_rows(
+  fs_data |>
+    filter(variable_code == "totlandginc") |>
+    summarise(euro = sum(value, na.rm = TRUE), .by = year) |>
+    mutate(source = "FS data"),
+  fs_landings |>
+    filter(variable_code == "totvallandg") |>
+    summarise(euro = sum(value, na.rm = TRUE), .by = year) |>
+    mutate(source = "FS landings")
+) |>
+  pivot_wider(names_from = source, values_from = euro) |>
+  mutate(difference_pct = round(100 * (`FS landings` - `FS data`) / `FS data`, 1)) |>
+  arrange(year)
+
+value_by_year |>
+  gt() |>
+  fmt_number(c(`FS data`, `FS landings`), decimals = 0) |>
+  fmt_number(difference_pct, decimals = 1)
+```
+
+From 2009 to 2023 the two series differ by less than three percent, so the landings sheets are
+effectively a disaggregation of the same reporting. They are not an exact one, because the two
+templates are submitted separately by Member States and because confidentiality suppression and
+clustering apply differently at the two levels of detail. The 2008 and 2024 gaps are larger for the
+reasons given below.
+
+The practical consequence for the fish provisioning method is a clean division of labour. Live
+weight in kilograms exists only in the landings sheets, so the biophysical account has to come from
+there. Income and expenditure exist only in `FS data`, so the net economic result has to come from
+there. That is why the routine reads both.
+
+# What the NOTES sheet says
+
+The workbook opens with a page of caveats. These are the ones that bear on our use of it.
+
+**Fleet segments and their names.** A fleet segment is a group of similar vessels defined by vessel
+length group, main fishing technology and geo indicator, operating predominantly in one
+supra-region. The `fs_name` column encodes all of those. Where segments have been clustered, all
+members of the cluster share one `fs_name` and the name ends with an asterisk.
+
+**Confidentiality.** Data for segments containing fewer than ten vessels may have been excluded
+altogether or merged into a cluster. This is the origin of the gaps that the processing routine
+fills with average prices.
+
+**Currency.** All monetary values in this workbook are in nominal euro. The Annual Economic Report
+published from the same data uses 2023 constant prices instead. Any comparison we make across years
+needs its own deflation step, and we should state the base year explicitly.
+
+**Provisional data.** Values for 2024, where available, may be provisional, incomplete or subject to
+revision.
+
+**Relationship to the published report.** The workbook may not match the tables in the 2025 Annual
+Economic Report, which applied further checks and exclusions. Data coverage and quality issues are
+not flagged in the workbook itself.
+
+Methodology and variable definitions are documented at
+[stecf.jrc.ec.europa.eu/reports](https://stecf.jrc.ec.europa.eu/reports) and
+[datacollection.jrc.ec.europa.eu/data-calls](https://datacollection.jrc.ec.europa.eu/data-calls).
+
+# Coverage, and why 2024 is not usable yet
+
+The landings sheets look complete for every year including 2024, in the sense that almost every row
+carries a value. That is misleading on its own, because 2024 has only a fifth as many rows as 2023.
+
+```{r}
+#| label: coverage-landings
+
+fs_landings |>
+  summarise(
+    rows = n(),
+    countries = n_distinct(country_code),
+    kg = sum(value[unit == "kg"], na.rm = TRUE),
+    .by = year
+  ) |>
+  arrange(year) |>
+  gt() |>
+  fmt_number(c(rows, kg), decimals = 0)
+```
+
+The economic sheet is where the problem is decisive. The resource rent approach subtracts total
+expenditure from total income for each fleet segment. In 2024 no Member State has yet reported any
+expenditure variable except a handful of energy cost figures.
+
+```{r}
+#| label: coverage-economic
+
+fs_data |>
+  filter(variable_group %in% c("Income", "Expenditure"), year >= 2022) |>
+  summarise(reported = sum(!is.na(value)), .by = c(year, variable_group, variable_code)) |>
+  pivot_wider(names_from = year, values_from = reported, names_prefix = "y") |>
+  arrange(variable_group, variable_code) |>
+  gt(groupname_col = "variable_group")
+```
+
+Only eleven of the twenty-two Member States reported any income for 2024, and the absent group
+includes Spain, France, Italy, Portugal, Ireland and Greece.
+
+```{r}
+#| label: coverage-countries
+
+fs_data |>
+  filter(variable_group == "Income", !is.na(value), year %in% c(2023, 2024)) |>
+  summarise(euro = sum(value), .by = c(country_code, year)) |>
+  pivot_wider(names_from = year, values_from = euro, names_prefix = "y") |>
+  mutate(pct_of_2023 = round(100 * y2024 / y2023)) |>
+  arrange(pct_of_2023) |>
+  gt() |>
+  fmt_number(c(y2023, y2024), decimals = 0) |>
+  sub_missing(missing_text = "not reported")
+```
+
+**The latest year that can be valued in full is 2023.** The 2024 landings can be reported in
+physical terms with a clear provisional caveat, but they cannot carry a monetary valuation until the
+next data call fills in the expenditure side.
+
+# Regenerating the files
+
+Download the workbook from the STECF data dissemination page, place it in `data/stecf/` under its
+original name, and run the script from the project root. Nothing else in the repository needs to
+change; the processing routine reads the RDS files, not the workbook.

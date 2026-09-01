@@ -1,0 +1,1166 @@
+---
+title: "Marine Ecosystem Services Processing"
+subtitle: "Fish provisioning: annotated R processing routine"
+format: html
+toc: true
+toc-depth: 3
+bibliography: processing-references.bib
+csl: ../../apa-6th-edition.csl
+execute:
+  warning: false
+  message: false
+---
+
+# Introduction
+
+This page documents the R routine that turns the Scientific, Technical and Economic Committee for
+Fisheries (STECF) extraction [@stecf2024] into the fish provisioning accounts. Fish provisioning is
+the ecosystem contribution to the growth of aquatic biomass captured in uncultivated production
+contexts [@hainesyoung2018], and it is valued here with the resource rent approach of the SEEA
+Central Framework [@un2014]. The companion page on
+[methods](../marine-methods/index.qmd) states the equations; this page restates the earlier working
+script in a compact, reproducible form so that the team can inspect each step, reproduce it from the
+repository alone, and reuse the parts that generalise.
+
+The routine reads two committed RDS files produced from the STECF fleet-segment workbook:
+`FS_data_2008-2024.RDS` for income and expenditure, and `FS_landings_FAO_2008-2024.RDS` for
+landings in kilograms and euro. Kilograms exist only in the landings file; income and expenditure
+exist only in `FS data`. The conversion is documented on the
+[STECF Fleet Segment Data](../../FS-landings-data/) page.
+
+The routine has three components, and they run in this order because the second depends on the
+first:
+
+1. the **economic component**, which reduces the STECF economic variables to a single net economic
+   result per fleet segment and year (Eq. 3 of the methods report);
+2. the **biophysical component**, which cleans the landings table, harmonises fishing sub-regions,
+   assigns each sub-region to a European sea region, and attaches the species typology;
+3. the **resource rent allocation**, which distributes each fleet's net economic result across the
+   sub-regions and species it landed, then fills the gaps left by fleets without usable economic
+   data.
+
+::: {.callout-important}
+## 2024 is excluded from the valuation
+
+The STECF files run to 2024, but no Member State has reported a usable expenditure series for that
+year. The latest fully valuable year is 2023. The two year filters below therefore keep
+`year <= reference_year` and drop 2024. Landings for 2024 can be shown in physical terms with a
+provisional caveat; they cannot carry a resource rent.
+:::
+
+::: {.callout-note}
+## Monetary values are 2008 euro
+
+Allocation is done in nominal euro. A single step at the end converts resource rent to constant
+2008 prices with Eurostat HICP for EU-27 [@eurostat2026hicp]. The base year is `base_year` in the
+parameters chunk; changing it does not touch the allocation. Tables report both nominal and 2008
+euro, plus the year-on-year real change in 2008 euro. Physical landings are not deflated.
+:::
+
+::: {.callout-note}
+## Paths are relative to the project root
+
+`_quarto.yml` sets `execute-dir: project`, so every path below resolves from the repository root
+regardless of where the `.qmd` file sits. There is no need for `here::here()` or `setwd()`.
+:::
+
+## Preliminaries
+
+We work in the tidyverse throughout. `readxl` reads the lookup workbooks, `sf` joins the results to
+the marine region geometry, `writexl` writes the Excel deliverables, and `gt` formats the
+inspection tables. The workbooks are written with `writexl` rather than `openxlsx`: the latter
+currently emits drawing relationships with no drawing parts, and Excel refuses to open the file.
+
+```{r}
+#| label: libraries
+
+library(tidyverse)
+library(readxl)
+library(sf)
+library(writexl)
+library(gt)
+
+sf_use_s2(FALSE)
+```
+
+Every input and output path is declared once, at the top, so that a reader can see the full data
+footprint of the routine without scrolling. `reference_year` is the latest fully valuable year. The
+two year filters use `year <= reference_year` rather than `year == reference_year`; `year` is
+already part of every grouping key and every gap-filling join, so the result is a 2008 to 2023
+panel with no cross-year contamination.
+
+```{r}
+#| label: parameters
+
+reference_year <- 2023
+base_year <- 2008
+
+# Inputs
+stecf_economic_file <- "data/stecf/FS_data_2008-2024.RDS"
+stecf_landings_file <- "data/stecf/FS_landings_FAO_2008-2024.RDS"
+species_lookup_file <- "data/lookup/3.classification_vs_OFFICIAL.xlsx"
+gsa_lookup_file <- "data/lookup/Link_GSA_Marine regions_Mediterranean Sea.xlsx"
+hicp_file <- "data/lookup/hicp_eu27.csv"
+gis_file <- "data/gisdata/marine_regions.gpkg"
+
+# Outputs
+results_dir <- "data/outputs/results"
+gis_dir <- "data/outputs/gis"
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(gis_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+# Reference tables
+
+The classification decisions of the assessment were previously buried inside long `case_when()`
+blocks or made by hand in Excel. They are collected here instead, as tables wherever a table will
+do. The team can then review and amend them without reading the pipeline, and they are easy to
+export for the annex of the report.
+
+## Sub-region harmonisation
+
+STECF reports fishing areas at a finer resolution than the accounts require, and it mixes two
+naming systems: FAO fishing areas such as `37.1.1` and General Fisheries Commission for the
+Mediterranean sub-areas such as `sa21`. The table below collapses the finer codes onto the code
+actually used in the accounts. It reproduces the recodes of the original script exactly.
+
+```{r}
+#| label: sub-region-recodes
+#| eval: true
+
+sub_reg_recodes <- tribble(
+  ~from,       ~to,
+  "37.1.1",    "sa5",
+  "sa21.1",    "sa21",
+  "sa21.2",    "sa21",
+  "sa21.3",    "sa21",
+  "37.2.2",    "sa21",
+  "37.1.3",    "sa21",
+  "37.3.1",    "sa22",
+  "27.2.a.1",  "27.2.a",
+  "27.2.a.2",  "27.2.a",
+  "27.2.b.1",  "27.2.b",
+  "27.2.b.2",  "27.2.b",
+  "27.3.a.20", "27.3.a",
+  "27.3.a.21", "27.3.a",
+  "27.3.c.22", "27.3.c",
+  "27.3.b.23", "27.3.b",
+  "27.5.a.1",  "27.5.a",
+  "27.5.a.2",  "27.5.a",
+  "27.5.b.1",  "27.5.b",
+  "27.5.b.2",  "27.5.b",
+  "27.14.b.1", "27.14.b",
+  "27.14.b.2", "27.14.b"
+)
+```
+
+The correspondence between GFCM sub-areas and FAO Mediterranean divisions is held separately in
+`data/lookup`. The pipeline does not consume it; it is the reference that justifies the
+Mediterranean rows of the recode table, and it is the authority against which the sea region rules
+below can be audited.
+
+```{r}
+#| label: gsa-lookup
+#| eval: true
+
+gsa_to_fao <- read_excel(gsa_lookup_file, sheet = "Regions division") |>
+  rename(sub_reg = `Row Labels`, fao_division = Sea_Region)
+```
+
+
+## Sea region assignment
+
+Each harmonised sub-region belongs to one of the four pan-European marine regions of the Marine
+Strategy Framework Directive, or to the rest of the world when a European fleet lands a catch taken
+elsewhere. The rules are a direct transcription of the original `case_when()`; wrapping them in a
+function means the same classification can be reused by the overuse and blue carbon routines
+without copying the list of codes again.
+
+```{r}
+#| label: fn-assign-sea-region
+#| eval: true
+
+neao_sub_regions <- c(
+  "27.1.a",  "27.1.b",  "27.10.a", "27.10.b", "27.2.a",  "27.2.b",
+  "27.3.a",  "27.3.c",  "27.3.b",  "27.4.a",  "27.4.b",  "27.4.c",
+  "27.5.a",  "27.5.b",  "27.6.a",  "27.6.b",  "27.7.a",  "27.7.b",
+  "27.7.c",  "27.7.d",  "27.7.e",  "27.7.f",  "27.7.g",  "27.7.h",
+  "27.7.j",  "27.7.k",  "27.8.a",  "27.8.b",  "27.8.c",  "27.8.d",
+  "27.8.e",  "27.9.a",  "27.9.b",  "27.12.a", "27.12.b", "27.12.c",
+  "27.14.a", "27.14.b"
+)
+
+assign_sea_region <- function(sub_reg_clean) {
+  case_when(
+    sub_reg_clean == "0" ~ "unknown",
+    sub_reg_clean %in% c("sa28", "sa29", "sa30") ~ "Black Sea",
+    sub_reg_clean %in% paste0("sa", 1:27) ~ "Mediterranean Sea",
+    str_detect(sub_reg_clean, fixed("27.3.d")) ~ "Baltic Sea",
+    str_detect(sub_reg_clean, fixed("27.8")) |
+      sub_reg_clean %in% neao_sub_regions ~ "NEAO",
+    .default = "ROW"
+  )
+}
+```
+
+## Species typology
+
+STECF identifies species by their FAO ASFIS code but says nothing about what kind of animal it is
+or where in the water column it lives. The methods report fills that gap from FishBase and
+SeaLifeBase [@froese2024; @palomares2024], and the result is the classification workbook already in
+`data/lookup`. We derive two attributes from it: `species_group`, which separates fish from
+shellfish and from species whose code could not be matched with confidence, and `fish_type`, the
+aggregated water column typology of Table 1 of the methods report.
+
+```{r}
+#| label: species-typology
+#| eval: true
+
+species_types_raw <- read_excel(species_lookup_file, sheet = "Classification")
+
+species_types <- species_types_raw |>
+  transmute(
+    species_code,
+    species_name_lookup = species_name,
+    fish_type = Type,
+    species_group = case_when(
+      fish == 1 ~ "fish",
+      shellfish == 1 ~ "shellfish",
+      .default = "other"
+    )
+  ) |>
+  distinct(species_code, .keep_all = TRUE)
+```
+
+::: {.callout-warning}
+## This is where the manual Excel merge came from
+
+The original script joined landings to this classification by hand in Excel because the join in R
+produced double counting. The cause is visible in the workbook: eight species codes appear twice in
+the `Classification` sheet, so a plain `left_join()` duplicates every landing record for those
+species. `distinct(species_code, .keep_all = TRUE)` keeps the first entry and removes the
+duplication, which makes the merge reproducible in R. The check chunk below lists the affected
+codes so that the team can decide which of the two entries is correct.
+:::
+
+```{r}
+#| label: check-duplicate-species
+#| eval: true
+
+species_types_raw |>
+  filter(n() > 1, .by = species_code) |>
+  arrange(species_code) |>
+  select(species_code, species_name, Type, fish, shellfish, Other) |>
+  gt()
+```
+
+# Helper functions
+
+These operations recur often enough to be worth naming. Everything else stays as an explicit
+pipeline, because a named function that is called once hides more than it saves.
+
+Both STECF sheets carry the same block of administrative columns that the assessment never uses.
+`any_of()` rather than `all_of()` means the function works on both sheets even though they do not
+carry exactly the same set.
+
+```{r}
+#| label: fn-drop-admin-columns
+
+drop_stecf_admin_columns <- function(data) {
+  data |>
+    select(-any_of(c(
+      "upload_date", "geo_indicator", "cluster_name", "fromtable",
+      "framework", "template_name", "gear", "fishery", "activity"
+    )))
+}
+```
+
+Harmonising sub-regions is two steps: strip the stray whitespace that STECF sometimes carries, then
+apply the recode table. We strip first so that a code entered as `27.2.a.1 ` still matches. The raw
+`sub_reg` is kept alongside `sub_reg_clean` for traceability.
+
+```{r}
+#| label: fn-harmonise-sub-reg
+#| eval: true
+
+harmonise_sub_reg <- function(data, recodes = sub_reg_recodes) {
+  data |>
+    mutate(sub_reg_clean = str_remove_all(sub_reg, "\\s")) |>
+    left_join(
+      recodes,
+      by = join_by(sub_reg_clean == from),
+      relationship = "many-to-one"
+    ) |>
+    mutate(sub_reg_clean = coalesce(to, sub_reg_clean)) |>
+    select(-to)
+}
+```
+
+The gap filling described in Box 2 of the methods report is the same operation applied three times
+at successively coarser levels of aggregation. Expressing it once as a function that takes the
+grouping columns as an argument removes about sixty lines of copied code and guarantees that the
+three passes stay consistent with each other.
+
+```{r}
+#| label: fn-fill-price-gaps
+
+# Mean observed price of a species over an arbitrary set of grouping columns.
+average_price <- function(reference, by) {
+  reference |>
+    summarise(price = mean(price, na.rm = TRUE), .by = all_of(by))
+}
+
+# Assign that mean price to records that have landings but no usable rent.
+# Records that still find no reference price keep a price of zero and are
+# passed on to the next, coarser pass.
+fill_price_gaps <- function(gaps, reference, by, basis) {
+  gaps |>
+    select(-any_of(c("price", "sum_revenue", "price_basis"))) |>
+    left_join(
+      average_price(reference, by),
+      by = by,
+      relationship = "many-to-one"
+    ) |>
+    mutate(
+      price = replace_na(price, 0),
+      price_basis = if_else(price > 0, basis, NA_character_),
+      sum_revenue = sum_landed * price
+    )
+}
+```
+
+# Economic component
+
+## Loading the STECF economic table
+
+The economic file reports one row per fleet segment, year and economic variable. Inactive fleets
+are removed first because they land nothing and would otherwise distort the fleet averages. The
+year filter keeps the panel through `reference_year` and drops 2024, which cannot be valued.
+
+```{r}
+#| label: economic-load
+
+stecf_economic <- readRDS(stecf_economic_file) |>
+  filter(fishing_tech != "INACTIVE", year <= reference_year) |>
+  drop_stecf_admin_columns()
+```
+
+## Net economic result by fleet
+
+The resource rent approach values the service as the economic surplus of the fleet, that is total
+income less total costs (Eq. 3 of the methods report). STECF splits its economic variables into
+groups; we keep only `Expenditure` and `Income`, sign the expenditure negatively so that both can
+be summed in a single column, and aggregate to one net result per fleet segment and year.
+
+Missing values become zero and zero rows are then dropped. That looks circular, and it is
+deliberate: STECF uses a blank to mean "not reported" and the assessment treats a non-reported item
+as absent rather than as a true zero, so both end up excluded from the sum.
+
+```{r}
+#| label: fn-net-economic-by-fleet
+
+net_economic_by_fleet <- function(data) {
+  data |>
+    filter(variable_group %in% c("Expenditure", "Income")) |>
+    mutate(value = replace_na(value, 0)) |>
+    filter(value != 0) |>
+    mutate(money = if_else(variable_group == "Expenditure", -value, value)) |>
+    summarise(
+      total_expenditure = sum(money[variable_group == "Expenditure"]),
+      total_income = sum(money[variable_group == "Income"]),
+      total_net = total_income + total_expenditure,
+      .by = c(year, fs_name)
+    )
+}
+
+fleet_net <- net_economic_by_fleet(stecf_economic)
+```
+
+An ecosystem service cannot have a negative flow, because that would describe a disservice. Box 2
+of the methods report therefore splits the fleets in two: those with a positive net result carry the
+valuation, and those with a negative or zero result are treated as missing and recovered later from
+average prices.
+
+```{r}
+#| label: fleet-net-positive
+
+fleet_net_positive <- fleet_net |>
+  filter(total_net > 0)
+```
+
+# Biophysical component
+
+## Loading and cleaning landings
+
+The landings file reports quantities in several units. Only kilograms are relevant here, and rows
+with a zero quantity carry no information. We rename `value` to `landed_kg` immediately, because
+three different quantities are called `value` at various points of the original script and the name
+stops carrying meaning. The same `year <= reference_year` bound used on the economic file keeps the
+two sides of the join on the same years.
+
+```{r}
+#| label: landings-load
+
+landings_raw <- readRDS(stecf_landings_file) |>
+  filter(year <= reference_year) |>
+  drop_stecf_admin_columns() |>
+  filter(unit == "kg", value != 0) |>
+  rename(landed_kg = value)
+```
+
+## Harmonising regions and attaching the typology
+
+Sub-region harmonisation, sea region assignment and the species join all happen in one pipeline.
+The species join is the step that was previously done by hand in Excel; `relationship =
+"many-to-one"` makes `dplyr` fail loudly if the lookup ever regains duplicate codes, which is the
+guard the manual workflow lacked.
+
+```{r}
+#| label: landings-clean
+
+landings <- landings_raw |>
+  harmonise_sub_reg() |>
+  mutate(Sea_reg = assign_sea_region(sub_reg_clean)) |>
+  left_join(
+    species_types,
+    by = join_by(species_code),
+    relationship = "many-to-one"
+  )
+```
+
+Three checks are worth running every time the extraction is refreshed. The first lists species codes
+present in the landings but absent from the classification workbook; those rows would otherwise
+reach the accounting tables with a missing fish type. The second compares the species name STECF
+reports against the name the classification workbook holds for the same code, which is how a
+mis-assigned code shows itself. The third lists sub-regions that fell through to `ROW`, the
+catch-all category and therefore the place where a new or misspelled STECF code will hide.
+
+```{r}
+#| label: check-unmatched
+
+landings |>
+  filter(year == reference_year, is.na(fish_type)) |>
+  distinct(species_code, species_name) |>
+  arrange(species_code) |>
+  gt()
+
+landings |>
+  filter(year == reference_year, species_name != species_name_lookup) |>
+  distinct(species_code, species_name, species_name_lookup) |>
+  arrange(species_code) |>
+  gt()
+
+landings |>
+  filter(year == reference_year, Sea_reg == "ROW") |>
+  summarise(landed_kg = sum(landed_kg), .by = c(sub_reg, sub_reg_clean)) |>
+  arrange(desc(landed_kg)) |>
+  gt()
+```
+
+A fourth check needs no STECF data at all, so it is the one to look at first. Every sub-area listed
+in the GFCM correspondence workbook is Mediterranean by definition; any of them that the recode and
+classification rules fail to place in the Mediterranean is a gap in those rules.
+
+```{r}
+#| label: check-mediterranean-coverage
+#| eval: true
+
+gsa_to_fao |>
+  harmonise_sub_reg() |>
+  mutate(assigned = assign_sea_region(sub_reg_clean)) |>
+  filter(assigned != "Mediterranean Sea") |>
+  gt()
+```
+
+::: {.callout-warning}
+## Known edge case in the Mediterranean codes
+
+That last check returns two rows. `assign_sea_region()` matches Mediterranean sub-areas against the
+literal list `sa1` to `sa27`, so the decimal sub-areas `sa11.1` and `sa11.2` do not match and fall
+through to `ROW`. Both appear in the GFCM correspondence workbook, which suggests they are genuine
+Mediterranean areas. We have kept the original behaviour rather than silently changing published
+numbers; the `ROW` check above shows how much landing is affected, and the team can then decide
+whether to add the two codes to `sub_reg_recodes`.
+:::
+
+The 2023 landings, once harmonised and assigned to a sea region, must reproduce the tonnage the
+previous team baked into the macro-region shapefile. Any refactor of `harmonise_sub_reg()` or
+`assign_sea_region()` that moves these figures has broken the biophysical account.
+
+```{r}
+#| label: check-2023-tonnes-anchor
+
+anchor_2023 <- tribble(
+  ~Sea_reg,             ~anchor_tonnes,
+  "NEAO",                     1925814,
+  "Baltic Sea",                436672,
+  "Mediterranean Sea",         308722,
+  "Black Sea",                   9961,
+  "ROW",                       713131
+)
+
+anchor_check <- landings |>
+  filter(year == reference_year) |>
+  summarise(landed_tonnes = sum(landed_kg) / 1000, .by = Sea_reg) |>
+  left_join(anchor_2023, by = "Sea_reg") |>
+  mutate(
+    difference_tonnes = landed_tonnes - anchor_tonnes,
+    match = abs(difference_tonnes) < 0.6
+  ) |>
+  arrange(Sea_reg)
+
+anchor_check |>
+  gt() |>
+  fmt_number(c(landed_tonnes, anchor_tonnes, difference_tonnes), decimals = 1)
+
+stopifnot(
+  "2023 sea-region tonnes must match the published shapefile anchors" =
+    nrow(anchor_check) == nrow(anchor_2023) && all(anchor_check$match)
+)
+```
+
+# Resource rent allocation
+
+## Matching landings to fleet economics
+
+Landings and fleet economics meet on the fleet segment name and the year. The join is
+many-to-one because a fleet has one net result but many landing records. Records that find no
+positive net result are the gap set of Box 2; they keep their quantities and are valued later from
+average prices.
+
+```{r}
+#| label: landings-matched
+
+landings_matched <- landings |>
+  left_join(
+    fleet_net_positive,
+    by = join_by(fs_name, year),
+    relationship = "many-to-one"
+  )
+
+landings_valued_input <- landings_matched |>
+  filter(!is.na(total_net))
+
+landings_without_rent <- landings_matched |>
+  filter(is.na(total_net))
+```
+
+## Distributing the net result
+
+A fleet earns one net result but fishes several sub-regions and several species, and STECF cannot
+attribute cost or revenue any more finely than the fleet. The assessment therefore distributes the
+net result in proportion to the quantities landed, in two nested steps: first across the
+sub-regions the fleet worked (Eq. 4 and Eq. 5), then across the species it landed in each of those
+sub-regions (Eq. 6 and Eq. 7).
+
+The original script carried these weights as percentages and divided by one hundred again at each
+use. We keep them as shares, which is arithmetically identical and removes four opportunities for a
+misplaced factor of one hundred.
+
+```{r}
+#| label: rent-allocation
+
+landings_valued <- landings_valued_input |>
+  mutate(
+    fleet_landed_kg = sum(landed_kg, na.rm = TRUE),
+    .by = c(year, fs_name)
+  ) |>
+  mutate(
+    fleet_area_landed_kg = sum(landed_kg, na.rm = TRUE),
+    .by = c(year, fs_name, sub_reg_clean)
+  ) |>
+  mutate(
+    # Eq. 4: share of the fleet's catch taken in this sub-region
+    share_fleet_area = fleet_area_landed_kg / fleet_landed_kg,
+    # Eq. 5: net result attributable to the fleet in this sub-region
+    net_fleet_area = total_net * share_fleet_area,
+    # Eq. 6: share of that sub-regional catch made up by this species
+    share_species_area = landed_kg / fleet_area_landed_kg,
+    # Eq. 7: net result attributable to the species in this sub-region
+    net_species = net_fleet_area * share_species_area
+  )
+```
+
+## Observed prices
+
+The accounts report one figure per species, landing country and sub-region, so the fleet dimension
+is aggregated away here. Dividing the summed net result by the summed quantity gives the implied
+resource rent per kilogram, which is the price used to value the gap records in the next section.
+
+```{r}
+#| label: rent-prices
+
+accounting_keys <- c(
+  "year", "country_code", "sub_reg_clean", "Sea_reg",
+  "species_code", "species_name", "species_group", "fish_type"
+)
+
+rent_prices <- landings_valued |>
+  summarise(
+    sum_landed = sum(landed_kg, na.rm = TRUE),
+    sum_revenue = sum(net_species, na.rm = TRUE),
+    .by = all_of(accounting_keys)
+  ) |>
+  mutate(
+    price = if_else(sum_landed > 0, sum_revenue / sum_landed, NA_real_),
+    price_basis = "observed rent"
+  )
+```
+
+::: {.callout-note}
+## Two deliberate differences from the original script
+
+The original produced this table with `mutate()` followed by `distinct()`, which left one row per
+underlying fleet record rather than one row per accounting key; because the raw `sub_reg` was among
+the columns kept, sub-regions that had been collapsed by the recode table survived as separate rows
+carrying the same group total, and the final aggregation added them together. Using `summarise()`
+over an explicit key list produces exactly one row per group and removes that double counting.
+
+The original also guarded the division against a zero in the individual record's own net value
+rather than in the group's total quantity, which set a price to `NA` for records that had a valid
+group price. The guard here is on `sum_landed`, which is the quantity actually in the denominator.
+:::
+
+## Gap set
+
+Landings from fleets without a positive net result are aggregated onto the same accounting keys so
+that the two halves of the dataset share one grain. They arrive with quantities and no revenue.
+
+```{r}
+#| label: price-gaps
+
+price_gaps <- landings_without_rent |>
+  summarise(
+    sum_landed = sum(landed_kg, na.rm = TRUE),
+    .by = all_of(accounting_keys)
+  )
+```
+
+## Filling the gaps
+
+Box 2 of the methods report fills the gaps in three passes, each one coarser than the last: the
+average price of the species in the same country, then in the same sub-region, then across Europe.
+Each pass keeps what it could value and hands the remainder to the next. Anything still unvalued
+after the third pass has no observed price anywhere in the dataset for that species.
+
+```{r}
+#| label: gap-filling
+
+# Pass 1: average price of the species in the same landing country
+filled_country <- fill_price_gaps(
+  price_gaps,
+  rent_prices,
+  by = c("year", "species_code", "species_name", "country_code"),
+  basis = "country average"
+)
+
+# Pass 2: average price of the species in the same sub-region
+filled_sub_reg <- filled_country |>
+  filter(price == 0) |>
+  fill_price_gaps(
+    rent_prices,
+    by = c("year", "species_code", "species_name", "sub_reg_clean"),
+    basis = "sub-region average"
+  )
+
+# Pass 3: average price of the species anywhere in the dataset
+filled_europe <- filled_sub_reg |>
+  filter(price == 0) |>
+  fill_price_gaps(
+    rent_prices,
+    by = c("year", "species_code", "species_name"),
+    basis = "European average"
+  )
+```
+
+The passes overlap by construction, so the first two contribute only the records they actually
+valued. The third contributes everything that reaches it, including the records it could not value;
+those carry a quantity and a revenue of zero, which is what keeps the physical account complete
+even where the economic data does not reach. They are also extracted on their own, because their
+size is a useful measure of that reach.
+
+```{r}
+#| label: gap-filling-bind
+
+accounting_records <- bind_rows(
+  rent_prices,
+  filled_country |> filter(price > 0),
+  filled_sub_reg |> filter(price > 0),
+  filled_europe |> mutate(price_basis = replace_na(price_basis, "unvalued"))
+)
+
+unvalued_records <- filled_europe |>
+  filter(price == 0)
+```
+
+# Final dataset
+
+The four sources are aggregated once more onto the accounting keys, because a species, country and
+sub-region combination can receive quantities from both a positive-rent fleet and a gap-filled
+fleet. The final price is the revenue-weighted average that results, and the report's units are
+tonnes and thousands of euro.
+
+`price_basis` is collapsed into a readable label rather than dropped, so each row of the published
+table carries the provenance of its own valuation. Note that both unit conversions are applied to
+the aggregated columns; the original script converted quantities from the aggregate but converted
+revenue from the pre-aggregation column, so the two published units were computed on different
+bases.
+
+```{r}
+#| label: fish-provisioning
+
+fish_provisioning <- accounting_records |>
+  summarise(
+    landed_kg = sum(sum_landed, na.rm = TRUE),
+    revenue_eur = sum(sum_revenue, na.rm = TRUE),
+    price_basis = str_c(sort(unique(price_basis)), collapse = " + "),
+    .by = all_of(accounting_keys)
+  ) |>
+  mutate(
+    price_eur_per_kg = if_else(
+      landed_kg > 0, revenue_eur / landed_kg, NA_real_
+    ),
+    landed_tonnes = landed_kg / 1000,
+    revenue_thousand_eur = revenue_eur / 1000
+  ) |>
+  arrange(year, Sea_reg, country_code, species_code)
+```
+
+Deflation is applied here, after the accounts exist, and nowhere else. Eurostat HICP for EU-27,
+all-items, annual average index, is read from a committed lookup so the site builds without a
+network call [@eurostat2026hicp]. The factor is `HICP_t / HICP_2008`. Resource rent in 2008 euro
+is nominal rent divided by that factor. Year-on-year real change is computed later on the
+aggregate tables, where each sea region has a complete annual series.
+
+```{r}
+#| label: deflate
+
+hicp <- read_csv(hicp_file, show_col_types = FALSE)
+hicp_base <- hicp$hicp_index[hicp$year == base_year]
+if (length(hicp_base) != 1 || is.na(hicp_base) || hicp_base <= 0) {
+  stop("HICP lookup has no usable index for base_year = ", base_year)
+}
+
+fish_provisioning <- fish_provisioning |>
+  left_join(hicp, by = "year") |>
+  mutate(
+    deflator = hicp_index / hicp_base,
+    revenue_eur_2008 = revenue_eur / deflator,
+    revenue_thousand_eur_2008 = revenue_eur_2008 / 1000,
+    price_eur_per_kg_2008 = if_else(
+      landed_kg > 0, revenue_eur_2008 / landed_kg, NA_real_
+    )
+  )
+
+hicp |>
+  mutate(
+    deflator = hicp_index / hicp_base,
+    base = if_else(year == base_year, "base", "")
+  ) |>
+  gt() |>
+  cols_label(
+    year = "Year",
+    hicp_index = "HICP (2015 = 100)",
+    deflator = paste0("Deflator (", base_year, " = 1)"),
+    base = ""
+  ) |>
+  fmt_number(hicp_index, decimals = 2) |>
+  fmt_number(deflator, decimals = 4) |>
+  tab_source_note(
+    "Eurostat prc_hicp_aind, EU-27 (from 2020), CP00, annual average index."
+  )
+```
+
+The headline supply figure of the report is the catch by sea region, in tonnes and in thousands of
+euro. This is the aggregation of Eq. 1; the equivalent use table replaces `Sea_reg` with
+`country_code`, following Eq. 2. The table below is the 2023 slice, in 2008 euro.
+
+```{r}
+#| label: supply-summary
+
+fish_provisioning |>
+  filter(year == reference_year) |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = Sea_reg
+  ) |>
+  arrange(desc(landed_tonnes)) |>
+  gt() |>
+  fmt_number(decimals = 1) |>
+  tab_source_note(
+    paste0("Nominal euro and constant ", base_year, " euro. Latest fully valuable year.")
+  )
+```
+
+# Outputs
+
+The original script wrote twelve intermediate workbooks to disk. We write the panel twice as a
+flat deliverable, once as RDS and once as Excel, so the client can open the same table in either
+tool. The aggregate supply table, one year per sheet, is a third workbook. Observed prices and
+unvalued catch stay as RDS.
+
+```{r}
+#| label: write-outputs
+
+saveRDS(fish_provisioning, file.path(results_dir, "fish_provisioning.RDS"))
+saveRDS(rent_prices, file.path(results_dir, "rent_prices.RDS"))
+saveRDS(unvalued_records, file.path(results_dir, "unvalued_records.RDS"))
+
+write_xlsx(
+  list(fish_provisioning = fish_provisioning),
+  path = file.path(results_dir, "fish_provisioning.xlsx")
+)
+
+sea_order <- c(
+  "NEAO", "Baltic Sea", "Mediterranean Sea", "Black Sea", "ROW"
+)
+
+supply_by_sea <- fish_provisioning |>
+  filter(Sea_reg != "unknown") |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = c(year, Sea_reg)
+  ) |>
+  mutate(
+    Sea_reg = factor(Sea_reg, levels = sea_order),
+    price_eur_per_kg_2008 = if_else(
+      landed_tonnes > 0,
+      revenue_thousand_eur_2008 / landed_tonnes,
+      NA_real_
+    )
+  ) |>
+  arrange(Sea_reg, year) |>
+  mutate(
+    real_change_pct = 100 *
+      (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
+    .by = Sea_reg
+  )
+
+supply_totals <- supply_by_sea |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = year
+  ) |>
+  arrange(year) |>
+  mutate(
+    Sea_reg = "Total",
+    price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes,
+    real_change_pct = 100 *
+      (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1)
+  )
+
+aggregate_by_sea <- function(y) {
+  bind_rows(
+    supply_by_sea |>
+      filter(year == y) |>
+      arrange(Sea_reg) |>
+      mutate(Sea_reg = as.character(Sea_reg)),
+    supply_totals |> filter(year == y)
+  ) |>
+    transmute(
+      `Sea region` = Sea_reg,
+      `Landings (tonnes)` = landed_tonnes,
+      `Resource rent (thousand nominal euro)` = revenue_thousand_eur,
+      `Resource rent (thousand 2008 euro)` = revenue_thousand_eur_2008,
+      `Price (2008 euro per kg)` = price_eur_per_kg_2008,
+      `Real change (percent)` = real_change_pct
+    )
+}
+
+result_years <- sort(unique(fish_provisioning$year), decreasing = TRUE)
+results_sheets <- list()
+results_sheets[["Readme"]] <- tibble(
+  Information = c(
+    "European Commission, Joint Research Centre (JRC)",
+    "Fish provisioning ecosystem service accounts",
+    paste0(
+      "Base year ",
+      base_year,
+      ". Resource rent in thousand euro. Constant prices use Eurostat HICP for EU-27."
+    ),
+    "Real change is the year-on-year change in 2008 euro. It is blank in the base year.",
+    "One sheet per year. ROW is rest of world and is not shown on the European map.",
+    "Source: STECF 2025 Fleet Economic data call."
+  )
+)
+for (y in result_years) {
+  table_y <- aggregate_by_sea(y)
+  banner <- tibble(
+    `Sea region` = c(
+      "European Commission, Joint Research Centre (JRC)",
+      "Fish provisioning ecosystem service accounts",
+      paste0(
+        "Year ",
+        y,
+        ". Resource rent in thousand euro. Constant prices use ",
+        base_year,
+        " as the base year (Eurostat HICP, EU-27)."
+      )
+    )
+  )
+  results_sheets[[as.character(y)]] <- bind_rows(banner, table_y)
+}
+write_xlsx(
+  results_sheets,
+  path = file.path(results_dir, "fish_provisioning_results.xlsx")
+)
+
+```
+
+## Joining results to the marine regions
+
+Geometry lives in `data/gisdata/marine_regions.gpkg` and stays static. The published GeoPackage
+holds one copy of each polygon, with one column per year for landings, resource rent and price.
+That is the grain a map needs. Species, country and fleet belong in the RDS and Excel files, not
+in the geometry. Duplicating the polygons once per year was what made the first export large;
+three separate files, one per metric, would triplicate the geometry for no gain. QGIS users style
+`tonnes_2023`, `rent08_k_eur_2018` or `price08_eur_kg_2023` on the same layer. Nominal rent and
+price columns are kept beside the 2008-euro ones.
+
+Two layers are published. The macro layer is the four pan-European sea regions; it joins on
+`Sea_name` after a label recode. The division layer is the 58 FAO divisions and subdivisions; it
+joins on `F_CODE`, or on `F_DIVISION` when that code is unique to one feature, which is how the
+collapsed NEAO recodes find the dissolved polygons. Price is the quantity-weighted average,
+revenue over live weight, not a sum of prices.
+
+Mediterranean accounts use GFCM sub-areas (`sa1` to `sa27`) while the geometry is FAO `37.x.x`, so
+the GSA lookup is applied before the join. Black Sea sub-areas `sa28` to `sa30` are not in that
+workbook; they are mapped to Marmara, the Black Sea and the Azov Sea following the GFCM numbering.
+ROW cannot appear on a European map. In 2023 it was 21 percent of tonnage, so any map needs that
+reconciliation in mind. Legacy result columns on the source layers (`Tonnes_23`, `Money_23` and
+the truncated overuse names) are not copied.
+
+```{r}
+#| label: write-gpkg
+
+black_sea_to_fao <- tribble(
+  ~sub_reg_clean, ~fao_division,
+  "sa28", "37.4.1",
+  "sa29", "37.4.2",
+  "sa30", "37.4.3"
+)
+
+sub_reg_to_map_code <- bind_rows(
+  gsa_to_fao |>
+    transmute(
+      sub_reg_clean = str_remove_all(sub_reg, "\\s"),
+      map_code = fao_division
+    ),
+  black_sea_to_fao |>
+    transmute(sub_reg_clean, map_code = fao_division)
+)
+
+sea_reg_to_name <- tribble(
+  ~Sea_reg,             ~Sea_name,
+  "NEAO",               "NEAO",
+  "Mediterranean Sea",  "MED",
+  "Black Sea",          "Black",
+  "Baltic Sea",         "Baltic"
+)
+
+european_seas <- sea_reg_to_name$Sea_reg
+panel_years <- sort(unique(fish_provisioning$year))
+
+wide_metrics <- function(data, id_cols) {
+  widen <- function(value_col, prefix) {
+    data |>
+      select(all_of(id_cols), year, all_of(value_col)) |>
+      pivot_wider(
+        names_from = year,
+        values_from = all_of(value_col),
+        names_prefix = prefix
+      )
+  }
+  widen("landed_tonnes", "tonnes_") |>
+    left_join(widen("revenue_thousand_eur", "rent_k_eur_"), by = id_cols) |>
+    left_join(widen("revenue_thousand_eur_2008", "rent08_k_eur_"), by = id_cols) |>
+    left_join(widen("price_eur_per_kg", "price_eur_kg_"), by = id_cols) |>
+    left_join(widen("price_eur_per_kg_2008", "price08_eur_kg_"), by = id_cols) |>
+    select(
+      all_of(id_cols),
+      all_of(paste0("tonnes_", panel_years)),
+      all_of(paste0("rent_k_eur_", panel_years)),
+      all_of(paste0("rent08_k_eur_", panel_years)),
+      all_of(paste0("price_eur_kg_", panel_years)),
+      all_of(paste0("price08_eur_kg_", panel_years))
+    )
+}
+
+by_macro <- fish_provisioning |>
+  filter(Sea_reg %in% european_seas) |>
+  summarise(
+    landed_kg = sum(landed_kg),
+    revenue_eur = sum(revenue_eur),
+    revenue_eur_2008 = sum(revenue_eur_2008),
+    .by = c(year, Sea_reg)
+  ) |>
+  left_join(sea_reg_to_name, by = "Sea_reg") |>
+  mutate(
+    landed_tonnes = landed_kg / 1000,
+    revenue_thousand_eur = revenue_eur / 1000,
+    revenue_thousand_eur_2008 = revenue_eur_2008 / 1000,
+    price_eur_per_kg = if_else(landed_kg > 0, revenue_eur / landed_kg, NA_real_),
+    price_eur_per_kg_2008 = if_else(
+      landed_kg > 0, revenue_eur_2008 / landed_kg, NA_real_
+    )
+  )
+
+macro_geom <- st_read(gis_file, layer = "sea_regions_macro", quiet = TRUE) |>
+  select(Sea_name)
+
+macro_out <- macro_geom |>
+  left_join(wide_metrics(by_macro, c("Sea_name", "Sea_reg")), by = "Sea_name")
+
+division_geom <- st_read(gis_file, layer = "sea_regions_division", quiet = TRUE) |>
+  select(F_CODE, F_DIVISION, NAME_EN)
+
+division_join_keys <- bind_rows(
+  st_drop_geometry(division_geom) |>
+    transmute(map_code = F_CODE, F_CODE),
+  st_drop_geometry(division_geom) |>
+    summarise(n_features = n(), F_CODE = F_CODE[1], .by = F_DIVISION) |>
+    filter(n_features == 1) |>
+    transmute(map_code = F_DIVISION, F_CODE)
+) |>
+  distinct(map_code, .keep_all = TRUE)
+
+by_division <- fish_provisioning |>
+  filter(Sea_reg %in% european_seas) |>
+  left_join(sub_reg_to_map_code, by = "sub_reg_clean") |>
+  mutate(map_code = coalesce(map_code, sub_reg_clean)) |>
+  inner_join(division_join_keys, by = "map_code") |>
+  summarise(
+    landed_kg = sum(landed_kg),
+    revenue_eur = sum(revenue_eur),
+    revenue_eur_2008 = sum(revenue_eur_2008),
+    .by = c(year, F_CODE)
+  ) |>
+  mutate(
+    landed_tonnes = landed_kg / 1000,
+    revenue_thousand_eur = revenue_eur / 1000,
+    revenue_thousand_eur_2008 = revenue_eur_2008 / 1000,
+    price_eur_per_kg = if_else(landed_kg > 0, revenue_eur / landed_kg, NA_real_),
+    price_eur_per_kg_2008 = if_else(
+      landed_kg > 0, revenue_eur_2008 / landed_kg, NA_real_
+    )
+  )
+
+division_out <- division_geom |>
+  left_join(wide_metrics(by_division, "F_CODE"), by = "F_CODE")
+
+gpkg_out <- file.path(gis_dir, "fish_provisioning.gpkg")
+if (file.exists(gpkg_out)) {
+  file.remove(gpkg_out)
+}
+st_write(macro_out, gpkg_out, layer = "sea_regions_macro", quiet = TRUE)
+st_write(division_out, gpkg_out, layer = "sea_regions_division", quiet = TRUE)
+```
+
+A short coverage check for 2023: how much of the European-sea tonnage found a polygon, and how
+much of the total was ROW and therefore off the map.
+
+```{r}
+#| label: check-map-coverage
+
+mapped_2023 <- by_division |>
+  filter(year == reference_year) |>
+  summarise(mapped_tonnes = sum(landed_tonnes))
+
+european_2023 <- fish_provisioning |>
+  filter(year == reference_year, Sea_reg %in% european_seas) |>
+  summarise(european_tonnes = sum(landed_tonnes))
+
+row_2023 <- fish_provisioning |>
+  filter(year == reference_year) |>
+  summarise(
+    total_tonnes = sum(landed_tonnes),
+    row_tonnes = sum(landed_tonnes[Sea_reg == "ROW"])
+  )
+
+tibble(
+  european_tonnes = european_2023$european_tonnes,
+  mapped_tonnes = mapped_2023$mapped_tonnes,
+  unmapped_european_tonnes = european_2023$european_tonnes - mapped_2023$mapped_tonnes,
+  row_tonnes = row_2023$row_tonnes,
+  row_share_pct = 100 * row_2023$row_tonnes / row_2023$total_tonnes
+) |>
+  gt() |>
+  fmt_number(
+    c(european_tonnes, mapped_tonnes, unmapped_european_tonnes, row_tonnes),
+    decimals = 1
+  ) |>
+  fmt_number(row_share_pct, decimals = 1)
+```
+
+# Downloads
+
+`_quarto.yml` lists `data/outputs/gis/` and `data/outputs/results/` under `project.resources`, so
+these files are copied into the published site. The links below are relative to this page.
+
+```{r}
+#| label: downloads
+
+tibble(
+  File = c(
+    "fish_provisioning.RDS",
+    "fish_provisioning.xlsx",
+    "fish_provisioning_results.xlsx",
+    "rent_prices.RDS",
+    "unvalued_records.RDS",
+    "fish_provisioning.gpkg"
+  ),
+  Description = c(
+    "Species-country-sub-region panel, 2008 to 2023, including 2008-euro rent",
+    "The same panel as a single Excel sheet",
+    "Aggregate supply by sea region, one year per sheet, with real change",
+    "Observed resource-rent prices used in gap filling",
+    "Landings that could not be valued",
+    "Macro and division polygons with tonnes, nominal rent and 2008-euro rent"
+  ),
+  Path = c(
+    file.path("../../../data/outputs/results", "fish_provisioning.RDS"),
+    file.path("../../../data/outputs/results", "fish_provisioning.xlsx"),
+    file.path("../../../data/outputs/results", "fish_provisioning_results.xlsx"),
+    file.path("../../../data/outputs/results", "rent_prices.RDS"),
+    file.path("../../../data/outputs/results", "unvalued_records.RDS"),
+    file.path("../../../data/outputs/gis", "fish_provisioning.gpkg")
+  )
+) |>
+  mutate(Download = sprintf("[%s](%s)", File, Path)) |>
+  select(Download, Description) |>
+  gt() |>
+  fmt_markdown(Download) |>
+  cols_label(Download = "File")
+```
+
+# Open points
+
+These are decisions carried over from the original script, or deferred so that a later choice does
+not force a rewrite.
+
+- **Base year.** Monetary values are currently 2008 euro. The Annual Economic Report uses 2023
+  constant prices. If the client prefers another base, change `base_year` in the parameters chunk
+  and re-render; do not fold a new deflator into the allocation.
+- **Subsidies on investments.** Operating subsidies (`totdirsub`) sit inside `variable_group ==
+  "Income"`, so the Income plus Expenditure filter already captures them. Subsidies on investments
+  (`subinvest`) sit under `Capital` and are excluded. Box 1 of the methods report arguably includes
+  them.
+- **`Type` and `Type_1`.** The original script carried two classification columns under these
+  names. We have read `Type` as the water column typology and `Type_1` as the fish, shellfish and
+  other split, and renamed them `fish_type` and `species_group`. This should be confirmed against
+  the published accounting tables.
+- **Duplicate species codes.** Eight codes appear twice in the classification workbook. The routine
+  keeps the first entry; the correct entry should be chosen and the workbook corrected at source.
+- **Mediterranean sub-areas `sa11.1` and `sa11.2`.** See the warning above; these currently fall
+  into `ROW`.
+
+# References
+
+::: {#refs}
+:::

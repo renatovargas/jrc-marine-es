@@ -1,0 +1,37 @@
+---
+description: Quarto project layout, R path conventions, and prose style for the JRC Marine ES site
+alwaysApply: true
+---
+
+# Quarto project conventions
+
+This repository is a Quarto website configured in `_quarto.yml` with:
+
+- `output-dir: docs`, because GitHub Pages serves the rendered site from `docs/`. Never write
+  rendered output anywhere else and never commit edits directly to `docs/`.
+- `execute-dir: project`, so every chunk runs with the working directory set to the project root.
+
+All file paths in R code are therefore relative to the project root. Never use `here::here()`,
+`setwd()`, `rprojroot`, or absolute paths.
+
+```r
+# Correct
+species_types <- read_excel("data/lookup/3.classification_vs_OFFICIAL.xlsx")
+
+# Wrong
+species_types <- read_excel(here::here("data", "lookup", "3.classification_vs_OFFICIAL.xlsx"))
+species_types <- read_excel("../../data/lookup/3.classification_vs_OFFICIAL.xlsx")
+```
+
+# R style
+
+Write tidyverse-friendly code; prefer the native pipe `|>`, `dplyr` verbs, and the `.by` argument
+over `group_by()` plus `ungroup()`. Keep pipelines short enough that a reader can follow them
+without running the code.
+
+# Prose style
+
+- Never use em-dashes. Use a semicolon, a comma, or a full stop instead.
+- Never use the construction "it is not x, it is y" or "not only x, but y".
+- Prefer short declarative sentences; use semicolons to join closely related clauses.
+- Do not use emojis.

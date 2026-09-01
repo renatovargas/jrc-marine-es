@@ -1,0 +1,158 @@
+---
+description: Project background, data sources, findings so far, and open work for the JRC Marine ES accounts
+alwaysApply: true
+---
+
+# What this project is
+
+We are updating the JRC fish provisioning ecosystem service accounts for the EU. A previous team
+built the 2018 and 2023 assessments with a hand-run R script plus manual steps in Excel and QGIS.
+We were hired to make that routine compact, reproducible and repeatable for future data vintages,
+and to publish it as a Quarto site on GitHub Pages so the team can inspect it.
+
+The source method is `reference/marine-methods.docx`, a JRC report. Chapter 4 covers fish
+provisioning; Equations 1 to 7 and Boxes 1 and 2 are the ones the code implements. The original
+script is `reference/old-processing-script.R`. `reference/emdb_processing.qmd` is a style reference
+from another project, not part of this one.
+
+The method in one paragraph: fish provisioning is valued with the resource rent approach. For each
+fleet segment, net economic result equals income minus expenditure (Eq. 3). That single figure is
+distributed across the sub-regions the fleet fished and then across the species it landed, weighted
+by kilograms (Eq. 4 to 7). Fleets with a negative or zero net result cannot carry a valuation,
+because an ecosystem service cannot have a negative flow, so their landings are valued from average
+observed prices in three widening passes: same country, then same sub-region, then Europe-wide
+(Box 2).
+
+# Repository layout
+
+- `_quarto.yml` sets `output-dir: docs`, `execute-dir: project`, and a `render:` list that excludes
+  `data/` and `reference/`. That exclusion is load-bearing; see the QGIS trap below.
+- `documentation/methods/marine-processing/index.qmd` is the main deliverable, the annotated
+  processing routine.
+- `documentation/methods/marine-methods/index.qmd` is a stub for the method write-up.
+- `documentation/FS-landings-data/index.qmd` documents the STECF data conversion.
+- `data/stecf/` holds the source workbook (gitignored), the conversion script, and two RDS outputs.
+- `data/lookup/` holds three curated Excel lookups plus `hicp_eu27.csv`, the Eurostat HICP series
+  used to deflate resource rent to 2008 euro.
+- `data/gisdata/` holds `marine_regions.gpkg` and the script that built it.
+- `data/outputs/results/` holds the published tables: `fish_provisioning.RDS` and a matching
+  flat `fish_provisioning.xlsx`, plus `fish_provisioning_results.xlsx` (aggregate supply, one
+  year per sheet). `data/outputs/gis/fish_provisioning.gpkg` holds the map layers. These are
+  versioned so they can be downloaded from the repo.
+
+# Data
+
+The source is `data/stecf/STECF_25 07_EU Fleet Economic and Transversal data_fleet segment
+level.xlsx`, 285 MB, from the 2025 Fleet Economic data call. It is gitignored and must never be
+committed. `data/stecf/stecf_to_rds.R` converts it; run `Rscript data/stecf/stecf_to_rds.R` from the
+project root. It takes about 35 seconds and produces:
+
+- `data/stecf/FS_landings_FAO_2008-2024.RDS`, 1,810,826 rows. Species by FAO sub-region, per fleet
+  segment and year. Every observation appears twice, as `totwghtlandg` in kg and `totvallandg` in
+  euro. Built from three sheets whose names understate their content; the tab labelled 2018-2023
+  contains 2024.
+- `data/stecf/FS_data_2008-2024.RDS`, 449,948 rows. Economic and transversal variables at fleet
+  segment level, no species or sub-region dimension.
+
+These are different tables that overlap in one variable. Kilograms exist only in the landings file;
+income and expenditure exist only in `FS data`. The routine must read both. Their value-of-landings
+series agree within three percent from 2009 to 2023.
+
+Lookups in `data/lookup/`: `3.classification_vs_OFFICIAL.xlsx` maps species code to water column
+type and to the fish, shellfish or other split; `Link_GSA_Marine regions_Mediterranean Sea.xlsx`
+maps GFCM sub-areas (`sa1` to `sa27`) to FAO Mediterranean divisions (`37.x.x`), which is required
+for any Mediterranean map; `Overuse_Total.xlsx` holds the overuse scores, not yet wired into code.
+
+# Findings that must not be rediscovered
+
+**2024 cannot be valued.** No Member State has reported any expenditure variable for 2024 except 23
+energy cost figures, and only 11 of 22 reported any income. The latest fully valuable year is 2023.
+2024 landings can be shown in physical terms with a provisional caveat only.
+
+**Subsidies are already included.** Operating subsidies are `totdirsub` inside
+`variable_group == "Income"`, so filtering to Income plus Expenditure captures them. Subsidies on
+investments (`subinvest`) sit under `Capital` and are excluded; Box 1 arguably includes them. Open.
+
+**Sub-region codes carry whitespace.** About 21,000 of 57,000 landing rows write `sa 21` rather than
+`sa21`. Whitespace must be stripped before any recode or join, or the entire Mediterranean fails to
+match silently.
+
+**Eight species codes are duplicated** in the classification workbook (CAS, RKQ, SCY, SHR, SJA, SRK,
+SSB, YRS). This is why the previous team did the species merge by hand in Excel; a plain join
+duplicates landings. The routine deduplicates and a check chunk lists them.
+
+**`sa11.1` and `sa11.2` fall into ROW.** `assign_sea_region()` matches the literal list `sa1` to
+`sa27`, so the two decimal Mediterranean sub-areas are misclassified. Original behaviour was kept
+deliberately rather than silently changing published numbers. Open.
+
+**Three bugs in the original were fixed** and are documented in callouts on the processing page:
+the price table double counted collapsed sub-regions; the division guard tested the wrong column;
+and the two published unit conversions were computed on different bases.
+
+**Validation anchor.** Running the current `harmonise_sub_reg()` and `assign_sea_region()` over 2023
+landings gives, in tonnes, NEAO 1,925,814, Baltic 436,672, Mediterranean 308,722, Black Sea 9,961,
+ROW 713,131. The first four match the `Tonnes_23` attributes the previous team baked into
+`Macro_Division_European_Sea.shp` to the kilogram. Any refactor must still reproduce these.
+
+# Geometry
+
+All geometry now lives in `data/gisdata/marine_regions.gpkg`, one GeoPackage with eight layers, all
+WGS 84, all FAO fishing area geometry. The eight source shapefiles and their 53 sidecar files were
+converted by `data/gisdata/shapefiles_to_gpkg.R` and then deleted. Every field of every layer was
+verified value for value against the shapefiles before deletion. The script cannot be rerun and is
+kept only as a record.
+
+- `sea_regions_macro`, 4 features. The base map. `Sea_name` holds NEAO, MED, Black and Baltic and
+  joins to our `Sea_reg` after a label recode.
+- `sea_regions_division`, 58 features. The detailed map, at FAO division and subdivision level.
+- `baltic_sea` 10, `black_sea` 3, `mediterranean_sea` 7, `neao` 38. Subsets of the 58.
+- `neao_fao_subdivisions`, 55 features. The finer, undissolved FAO geometry.
+- `mediterranean_legacy`, 7 features. Same geometry as `mediterranean_sea`; the only surviving copy
+  of the published 2023 Mediterranean attributes.
+
+The `_modified` shapefiles were chosen as authoritative because Baltic plus Black plus Mediterranean
+plus modified NEAO reproduce the F_CODE set of the 58 feature layer exactly, and the unmodified NEAO
+does not. That modification was a dissolve of finer FAO subdivisions, the same collapse that
+`sub_reg_recodes` performs in the processing routine.
+
+Join on `F_CODE` or `F_DIVISION` against `sub_reg_clean`, never against the raw `sub_reg`. The
+Mediterranean needs the GSA lookup because the layers are FAO `37.x.x` while the accounts are
+`saNN`; Mediterranean maps are therefore coarser than Mediterranean tables. ROW was 21 percent of
+2023 tonnage and cannot appear on a European map, so maps need a reconciliation note.
+
+Several layers carry result columns the previous team joined in by hand in QGIS, and a `path` field
+still pointing at `E:/pisando/.../8_Maps/`. Those are legacy. Field names drift between layers
+(`OversusTon`, `OveruseTon`, `OverusTonn`, `OverTonnes`, `Over_Ton`) because DBF truncated them to
+ten characters. Do not extend that pattern; keep geometry static and join results at render time.
+
+`NAME_FR` and `NAME_ES` contain 74 U+FFFD replacement characters. The accents were destroyed by some
+export before the files reached us and are unrecoverable; the DBF held zero Latin-1 accented bytes.
+Use `NAME_EN`, which is clean.
+
+**QGIS trap.** QGIS writes layer metadata sidecars that also use the `.qmd` extension. Quarto picked
+those up as documents and the whole site build failed. Moving to GeoPackage removed them, and the
+`render:` exclusion in `_quarto.yml` stays as a guard. Anything added under `data/` must stay
+excluded.
+
+# Conventions
+
+Nominal euro is produced by the allocation. A single step at the end converts resource rent to
+constant prices with Eurostat HICP for EU-27. The base year is `base_year` in the processing
+parameters chunk and is currently 2008, the first year of the panel. Changing it is a one-line
+edit. Tables report nominal euro, 2008 euro, and year-on-year real change in 2008 euro.
+
+The processing page builds the 2008-2023 panel in one pass. `year` is part of every grouping key
+and every gap-filling join, so there is no cross-year contamination. `reference_year` is kept for
+the live 2023 checks and the dashboard headline figures.
+
+The published GeoPackage is map grain only: one polygon per sea region or FAO division, with one
+column per year for landings, resource rent (nominal and 2008 euro) and price. Species, country
+and fleet stay in the RDS and Excel files. Splitting into three files, one per metric, would
+triplicate the geometry for no gain.
+
+# Open work
+
+1. Confirm the 2008 base year with the client; switch `base_year` if they prefer 2023 constant prices.
+2. Resolve the open items above: `subinvest`, `sa11.1` and `sa11.2`, the duplicate species codes,
+   and confirm that `Type` and `Type_1` in the published tables correspond to our `fish_type` and
+   `species_group`.

@@ -1,0 +1,336 @@
+---
+title: "Fish provisioning"
+subtitle: "EU marine ecosystem service accounts, 2008 to 2023"
+format:
+  dashboard:
+    theme:
+      - cosmo
+      - brand
+    scrolling: true
+    orientation: rows
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| output: false
+
+library(tidyverse)
+library(sf)
+library(gt)
+
+sf_use_s2(FALSE)
+
+reference_year <- 2023
+base_year <- 2008
+
+fish_provisioning <- readRDS("data/outputs/results/fish_provisioning.RDS")
+macro <- st_read(
+  "data/outputs/gis/fish_provisioning.gpkg",
+  layer = "sea_regions_macro",
+  quiet = TRUE
+)
+
+sea_order <- c(
+  "NEAO", "Baltic Sea", "Mediterranean Sea", "Black Sea", "ROW"
+)
+
+by_sea_year <- fish_provisioning |>
+  filter(Sea_reg != "unknown") |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = c(year, Sea_reg)
+  ) |>
+  mutate(
+    price_eur_per_kg_2008 = if_else(
+      landed_tonnes > 0,
+      revenue_thousand_eur_2008 / landed_tonnes,
+      NA_real_
+    ),
+    Sea_reg = factor(Sea_reg, levels = sea_order)
+  ) |>
+  arrange(Sea_reg, year) |>
+  mutate(
+    real_change_pct = 100 *
+      (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
+    .by = Sea_reg
+  )
+
+panel_years <- sort(unique(by_sea_year$year), decreasing = TRUE)
+
+by_sea_2023 <- by_sea_year |>
+  filter(year == reference_year) |>
+  arrange(Sea_reg)
+
+totals_2023 <- by_sea_2023 |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008)
+  ) |>
+  mutate(
+    price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes
+  )
+
+row_share_2023 <- 100 *
+  by_sea_2023$landed_tonnes[by_sea_2023$Sea_reg == "ROW"] /
+  totals_2023$landed_tonnes
+
+macro_2023 <- macro |>
+  mutate(
+    landed_tonnes = tonnes_2023,
+    revenue_thousand_eur_2008 = rent08_k_eur_2023,
+    price_eur_per_kg_2008 = price08_eur_kg_2023,
+    Sea_label = recode(
+      Sea_name,
+      NEAO = "North East Atlantic",
+      MED = "Mediterranean Sea",
+      Black = "Black Sea",
+      Baltic = "Baltic Sea"
+    )
+  )
+
+supply_gt <- function(y) {
+  by_sea <- by_sea_year |>
+    filter(year == y) |>
+    arrange(Sea_reg)
+  totals <- by_sea |>
+    summarise(
+      landed_tonnes = sum(landed_tonnes),
+      revenue_thousand_eur = sum(revenue_thousand_eur),
+      revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008)
+    ) |>
+    mutate(
+      price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes,
+      prev_total = sum(
+        by_sea_year$revenue_thousand_eur_2008[by_sea_year$year == y - 1]
+      ),
+      real_change_pct = if_else(
+        prev_total > 0,
+        100 * (revenue_thousand_eur_2008 / prev_total - 1),
+        NA_real_
+      )
+    )
+  bind_rows(
+    by_sea |>
+      transmute(
+        Sea_reg = as.character(Sea_reg),
+        landed_tonnes,
+        revenue_thousand_eur,
+        revenue_thousand_eur_2008,
+        price_eur_per_kg_2008,
+        real_change_pct
+      ),
+    totals |>
+      transmute(
+        Sea_reg = "Total",
+        landed_tonnes,
+        revenue_thousand_eur,
+        revenue_thousand_eur_2008,
+        price_eur_per_kg_2008,
+        real_change_pct
+      )
+  ) |>
+    gt(rowname_col = "Sea_reg") |>
+    cols_label(
+      landed_tonnes = "Landings (tonnes)",
+      revenue_thousand_eur = "Resource rent (thousand nominal €)",
+      revenue_thousand_eur_2008 = "Resource rent (thousand 2008 €)",
+      price_eur_per_kg_2008 = "Price (2008 €/kg)",
+      real_change_pct = "Real change (%)"
+    ) |>
+    fmt_number(landed_tonnes, decimals = 0) |>
+    fmt_number(revenue_thousand_eur, decimals = 0) |>
+    fmt_number(revenue_thousand_eur_2008, decimals = 0) |>
+    fmt_number(price_eur_per_kg_2008, decimals = 2) |>
+    fmt_number(real_change_pct, decimals = 1) |>
+    tab_source_note(
+      "Real change is the year-on-year change in 2008 euro. Blank in 2008. 2024 is excluded because expenditure was not reported."
+    )
+}
+
+choropleth <- function(data, fill, legend) {
+  ggplot(data) +
+    geom_sf(aes(fill = {{ fill }}), colour = "white", linewidth = 0.35) +
+    scale_fill_viridis_c(
+      option = "C",
+      labels = scales::label_comma(),
+      name = legend,
+      na.value = "grey90"
+    ) +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(
+      legend.position = "right",
+      plot.caption = element_text(hjust = 0, size = 10, colour = "grey30"),
+      plot.margin = margin(4, 8, 4, 8)
+    )
+}
+
+fmt_tonnes <- function(x) {
+  paste0(format(round(x), big.mark = ",", scientific = FALSE), " t")
+}
+
+fmt_million_eur <- function(x) {
+  paste0(
+    format(round(x / 1000), big.mark = ",", scientific = FALSE),
+    " million"
+  )
+}
+```
+
+# Overview
+
+## Row {height="16%"}
+
+```{r}
+#| content: valuebox
+#| title: "2023 landings"
+#| icon: globe-europe-africa
+#| color: primary
+
+list(value = fmt_tonnes(totals_2023$landed_tonnes))
+```
+
+```{r}
+#| content: valuebox
+#| title: "2023 resource rent, 2008 euro"
+#| icon: currency-euro
+#| color: secondary
+
+list(value = fmt_million_eur(totals_2023$revenue_thousand_eur_2008))
+```
+
+```{r}
+#| content: valuebox
+#| title: "ROW share of 2023 tonnage"
+#| icon: globe
+#| color: warning
+
+list(value = paste0(round(row_share_2023), "%"))
+```
+
+## Row {height="62%"}
+
+::: {.card title="Supply by sea region (2008 euro)"}
+::: {.panel-tabset}
+
+```{r}
+#| label: supply-tabs
+#| results: asis
+
+for (y in panel_years) {
+  cat("\n### ", y, "\n\n", sep = "")
+  print(supply_gt(y))
+  cat("\n")
+}
+```
+
+:::
+:::
+
+## Row {height="22%"}
+
+::: {.card}
+**Rest of world is off the map.** ROW was `r round(row_share_2023)` percent of 2023
+tonnage. Those landings were taken by EU fleets outside the four pan-European sea
+regions and cannot appear on a European choropleth. They remain in the tables and
+in the time series.
+:::
+
+::: {.card}
+**Monetary values are 2008 euro.** Resource rent is deflated with Eurostat HICP for
+EU-27. The allocation itself stays in nominal euro. Real change is the year-on-year
+change in 2008 euro. The base year is the first year of the panel and can be switched
+in one line if the client prefers 2023 constant prices.
+:::
+
+# Maps
+
+## Row {height="12%"}
+
+::: {.card}
+Choropleths show the four Marine Strategy Framework Directive regions only. ROW was
+`r round(row_share_2023)` percent of 2023 tonnage and falls outside the European
+map. Value and price are 2008 euro.
+:::
+
+## Row {.tabset height="88%"}
+
+### Landings (tonnes)
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+choropleth(macro_2023, landed_tonnes, "Tonnes") +
+  labs(caption = "2023 live weight. ROW is not shown.")
+```
+
+### Value (thousand 2008 €)
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+choropleth(macro_2023, revenue_thousand_eur_2008, "Thousand\n2008 €") +
+  labs(caption = "2023 resource rent, 2008 euro. ROW is not shown.")
+```
+
+### Price (2008 €/kg)
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+choropleth(macro_2023, price_eur_per_kg_2008, "2008 €/kg") +
+  labs(caption = "2023 quantity-weighted resource rent per kilogram, 2008 euro. ROW is not shown.")
+```
+
+# Trends
+
+## Row
+
+```{r}
+#| title: "Landings by sea region"
+#| fig-width: 11
+#| fig-height: 4.5
+
+by_sea_year |>
+  ggplot(aes(year, landed_tonnes, colour = Sea_reg)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.6) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  scale_x_continuous(breaks = seq(2008, 2023, by = 2)) +
+  scale_colour_brewer(palette = "Dark2", name = NULL) +
+  labs(x = NULL, y = "Tonnes") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Row
+
+```{r}
+#| title: "Resource rent by sea region (2008 euro)"
+#| fig-width: 11
+#| fig-height: 4.5
+
+by_sea_year |>
+  ggplot(aes(year, revenue_thousand_eur_2008, colour = Sea_reg)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.6) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  scale_x_continuous(breaks = seq(2008, 2023, by = 2)) +
+  scale_colour_brewer(palette = "Dark2", name = NULL) +
+  labs(
+    x = NULL,
+    y = "Thousand 2008 €",
+    caption = "Constant 2008 euro, Eurostat HICP for EU-27. Year-on-year change is real change in the service."
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
