@@ -7,3 +7,4 @@
 # Regenerate the committed RDS files with data/stecf/stecf_to_rds.R
 data/stecf/*.xlsx
 ~$*.xlsx
+reference/

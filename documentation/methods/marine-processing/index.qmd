@@ -67,9 +67,10 @@ regardless of where the `.qmd` file sits. There is no need for `here::here()` or
 ## Preliminaries
 
 We work in the tidyverse throughout. `readxl` reads the lookup workbooks, `sf` joins the results to
-the marine region geometry, `writexl` writes the Excel deliverables, and `gt` formats the
-inspection tables. The workbooks are written with `writexl` rather than `openxlsx`: the latter
-currently emits drawing relationships with no drawing parts, and Excel refuses to open the file.
+the marine region geometry, `writexl` writes the flat panel workbook, `openxlsx2` writes the
+formatted results workbook in the Outputs section, and `gt` formats the inspection tables.
+`writexl` cannot set number formats, column widths or borders, so it is kept only for the
+unformatted panel.
 
 ```{r}
 #| label: libraries
@@ -78,6 +79,7 @@ library(tidyverse)
 library(readxl)
 library(sf)
 library(writexl)
+library(openxlsx2)
 library(gt)
 
 sf_use_s2(FALSE)
@@ -98,6 +100,7 @@ base_year <- 2008
 # Inputs
 stecf_economic_file <- "data/stecf/FS_data_2008-2024.RDS"
 stecf_landings_file <- "data/stecf/FS_landings_FAO_2008-2024.RDS"
+country_codes_file <- "data/stecf/country_codes.csv"
 species_lookup_file <- "data/lookup/3.classification_vs_OFFICIAL.xlsx"
 gsa_lookup_file <- "data/lookup/Link_GSA_Marine regions_Mediterranean Sea.xlsx"
 hicp_file <- "data/lookup/hicp_eu27.csv"
@@ -108,6 +111,12 @@ results_dir <- "data/outputs/results"
 gis_dir <- "data/outputs/gis"
 dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(gis_dir, showWarnings = FALSE, recursive = TRUE)
+
+country_names <- readr::read_csv(country_codes_file, show_col_types = FALSE) |>
+  transmute(country_code = `alpha-3`, country = name) |>
+  mutate(
+    country = recode(country, `Netherlands, Kingdom of the` = "Netherlands")
+  )
 ```
 
 # Reference tables
@@ -772,8 +781,11 @@ hicp |>
 ```
 
 The headline supply figure of the report is the catch by sea region, in tonnes and in thousands of
-euro. This is the aggregation of Eq. 1; the equivalent use table replaces `Sea_reg` with
-`country_code`, following Eq. 2. The table below is the 2023 slice, in 2008 euro.
+euro. That is Eq. 1. STECF `country_code` is the Member State where the catch was landed, which is
+the use-table grain of Eq. 2. `fish_type` is the water-column typology of methods Table 1 (`Type` in
+the original script). The published annexes also split supply by coastal-state EEZ (Tables 10 to 13);
+that geometry is not in the repository, so EEZ tables and maps are not produced here. The two tables
+below are the 2023 slice, in 2008 euro.
 
 ```{r}
 #| label: supply-summary
@@ -788,9 +800,29 @@ fish_provisioning |>
   ) |>
   arrange(desc(landed_tonnes)) |>
   gt() |>
-  fmt_number(decimals = 1) |>
+  fmt_number(decimals = 2) |>
+  tab_header(title = "Eq. 1. Supply by sea region, 2023") |>
   tab_source_note(
     paste0("Nominal euro and constant ", base_year, " euro. Latest fully valuable year.")
+  )
+
+fish_provisioning |>
+  filter(year == reference_year) |>
+  left_join(country_names, by = "country_code") |>
+  mutate(country = coalesce(country, country_code)) |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = c(Sea_reg, country)
+  ) |>
+  arrange(Sea_reg, country) |>
+  gt() |>
+  fmt_number(decimals = 2) |>
+  tab_header(title = "Eq. 2. Use by sea region and landing country, 2023") |>
+  cols_label(Sea_reg = "Sea region", country = "Country") |>
+  tab_source_note(
+    "Country is the Member State of landing, not the EEZ of the fishing ground."
   )
 ```
 
@@ -798,8 +830,9 @@ fish_provisioning |>
 
 The original script wrote twelve intermediate workbooks to disk. We write the panel twice as a
 flat deliverable, once as RDS and once as Excel, so the client can open the same table in either
-tool. The aggregate supply table, one year per sheet, is a third workbook. Observed prices and
-unvalued catch stay as RDS.
+tool. The aggregate use tables, one year per sheet, are a third workbook. Column A is sea region by
+landing country by fish type, with missing fish types filled by zero; column K is the shorter sea
+region by landing country table. Observed prices and unvalued catch stay as RDS.
 
 ```{r}
 #| label: write-outputs
@@ -816,31 +849,76 @@ write_xlsx(
 sea_order <- c(
   "NEAO", "Baltic Sea", "Mediterranean Sea", "Black Sea", "ROW"
 )
+fish_type_order <- c(
+  "benthic", "benthopelagic", "demersal", "pelagic", "unclassified"
+)
 
-supply_by_sea <- fish_provisioning |>
+supply_detail <- fish_provisioning |>
   filter(Sea_reg != "unknown") |>
+  mutate(
+    fish_type = coalesce(fish_type, "unclassified"),
+    Sea_reg = factor(Sea_reg, levels = sea_order),
+    fish_type = factor(fish_type, levels = fish_type_order)
+  ) |>
   summarise(
     landed_tonnes = sum(landed_tonnes),
     revenue_thousand_eur = sum(revenue_thousand_eur),
     revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
-    .by = c(year, Sea_reg)
+    .by = c(year, Sea_reg, country_code, fish_type)
   ) |>
+  complete(
+    nesting(year, Sea_reg, country_code),
+    fish_type,
+    fill = list(
+      landed_tonnes = 0,
+      revenue_thousand_eur = 0,
+      revenue_thousand_eur_2008 = 0
+    )
+  ) |>
+  left_join(country_names, by = "country_code") |>
   mutate(
-    Sea_reg = factor(Sea_reg, levels = sea_order),
+    country = coalesce(country, country_code),
     price_eur_per_kg_2008 = if_else(
       landed_tonnes > 0,
       revenue_thousand_eur_2008 / landed_tonnes,
       NA_real_
     )
   ) |>
-  arrange(Sea_reg, year) |>
+  arrange(Sea_reg, country, fish_type, year) |>
   mutate(
-    real_change_pct = 100 *
-      (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
-    .by = Sea_reg
+    real_change_pct = if_else(
+      lag(revenue_thousand_eur_2008) > 0,
+      100 * (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
+      NA_real_
+    ),
+    .by = c(Sea_reg, country_code, fish_type)
   )
 
-supply_totals <- supply_by_sea |>
+supply_compact <- supply_detail |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = c(year, Sea_reg, country_code, country)
+  ) |>
+  mutate(
+    price_eur_per_kg_2008 = if_else(
+      landed_tonnes > 0,
+      revenue_thousand_eur_2008 / landed_tonnes,
+      NA_real_
+    )
+  ) |>
+  arrange(Sea_reg, country, year) |>
+  mutate(
+    real_change_pct = if_else(
+      lag(revenue_thousand_eur_2008) > 0,
+      100 * (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
+      NA_real_
+    ),
+    .by = c(Sea_reg, country_code)
+  )
+
+supply_totals <- supply_compact |>
   summarise(
     landed_tonnes = sum(landed_tonnes),
     revenue_thousand_eur = sum(revenue_thousand_eur),
@@ -850,65 +928,221 @@ supply_totals <- supply_by_sea |>
   arrange(year) |>
   mutate(
     Sea_reg = "Total",
-    price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes,
-    real_change_pct = 100 *
-      (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1)
+    country = NA_character_,
+    fish_type = NA_character_,
+    price_eur_per_kg_2008 = if_else(
+      landed_tonnes > 0,
+      revenue_thousand_eur_2008 / landed_tonnes,
+      NA_real_
+    ),
+    real_change_pct = if_else(
+      lag(revenue_thousand_eur_2008) > 0,
+      100 * (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
+      NA_real_
+    )
   )
 
-aggregate_by_sea <- function(y) {
+sheet_detail <- function(y) {
   bind_rows(
-    supply_by_sea |>
+    supply_detail |>
       filter(year == y) |>
-      arrange(Sea_reg) |>
+      arrange(Sea_reg, country, fish_type) |>
+      mutate(
+        Sea_reg = as.character(Sea_reg),
+        fish_type = as.character(fish_type)
+      ),
+    supply_totals |> filter(year == y)
+  ) |>
+    transmute(
+      sea_region = Sea_reg,
+      country,
+      fish_type,
+      landed_tonnes,
+      revenue_thousand_eur,
+      revenue_thousand_eur_2008,
+      price_eur_per_kg_2008,
+      real_change_pct
+    )
+}
+
+sheet_summary <- function(y) {
+  bind_rows(
+    supply_compact |>
+      filter(year == y) |>
+      arrange(Sea_reg, country) |>
       mutate(Sea_reg = as.character(Sea_reg)),
     supply_totals |> filter(year == y)
   ) |>
     transmute(
-      `Sea region` = Sea_reg,
-      `Landings (tonnes)` = landed_tonnes,
-      `Resource rent (thousand nominal euro)` = revenue_thousand_eur,
-      `Resource rent (thousand 2008 euro)` = revenue_thousand_eur_2008,
-      `Price (2008 euro per kg)` = price_eur_per_kg_2008,
-      `Real change (percent)` = real_change_pct
+      sea_region = Sea_reg,
+      country,
+      landed_tonnes,
+      revenue_thousand_eur,
+      revenue_thousand_eur_2008,
+      price_eur_per_kg_2008,
+      real_change_pct
     )
 }
 
 result_years <- sort(unique(fish_provisioning$year), decreasing = TRUE)
-results_sheets <- list()
-results_sheets[["Readme"]] <- tibble(
-  Information = c(
+
+detail_headers <- c(
+  "Sea region",
+  "Country",
+  "Fish type",
+  "Landings (tonnes)",
+  "Resource rent (thousand nominal euro)",
+  "Resource rent (thousand 2008 euro)",
+  "Price (2008 euro per kg)",
+  "Real change (percent)"
+)
+summary_headers <- c(
+  "Sea region",
+  "Country",
+  "Landings (tonnes)",
+  "Resource rent (thousand nominal euro)",
+  "Resource rent (thousand 2008 euro)",
+  "Price (2008 euro per kg)",
+  "Real change (percent)"
+)
+header_row <- 5L
+detail_start <- 1L
+summary_start <- 11L
+col_width <- 10
+spacer_width <- 3
+number_format <- "#,##0.00"
+
+write_banner <- function(wb, sheet, year, start_col, n_cols, grain) {
+  end_col <- start_col + n_cols - 1L
+  lines <- c(
     "European Commission, Joint Research Centre (JRC)",
     "Fish provisioning ecosystem service accounts",
     paste0(
-      "Base year ",
-      base_year,
-      ". Resource rent in thousand euro. Constant prices use Eurostat HICP for EU-27."
-    ),
-    "Real change is the year-on-year change in 2008 euro. It is blank in the base year.",
-    "One sheet per year. ROW is rest of world and is not shown on the European map.",
-    "Source: STECF 2025 Fleet Economic data call."
-  )
-)
-for (y in result_years) {
-  table_y <- aggregate_by_sea(y)
-  banner <- tibble(
-    `Sea region` = c(
-      "European Commission, Joint Research Centre (JRC)",
-      "Fish provisioning ecosystem service accounts",
-      paste0(
-        "Year ",
-        y,
-        ". Resource rent in thousand euro. Constant prices use ",
-        base_year,
-        " as the base year (Eurostat HICP, EU-27)."
-      )
+      "Year ", year, ". ", grain,
+      " Resource rent in thousand euro. Constant prices use ",
+      base_year, " as the base year (Eurostat HICP, EU-27)."
     )
   )
-  results_sheets[[as.character(y)]] <- bind_rows(banner, table_y)
+  for (row in 1:3) {
+    dims <- wb_dims(rows = row, cols = start_col:end_col)
+    wb <- wb_add_data(
+      wb, sheet, x = lines[[row]],
+      start_row = row, start_col = start_col, col_names = FALSE
+    )
+    wb <- wb_merge_cells(wb, sheet, dims = dims)
+    wb <- wb_add_cell_style(
+      wb, sheet,
+      dims = wb_dims(rows = row, cols = start_col),
+      wrap_text = TRUE, vertical = "center"
+    )
+  }
+  wb_set_row_heights(wb, sheet, rows = 1:3, heights = 18)
 }
-write_xlsx(
-  results_sheets,
-  path = file.path(results_dir, "fish_provisioning_results.xlsx")
+
+write_table <- function(wb, sheet, data, start_col, headers) {
+  n_cols <- length(headers)
+  end_col <- start_col + n_cols - 1L
+  header_dims <- wb_dims(rows = header_row, cols = start_col:end_col)
+  first_numeric <- n_cols - 4L
+  data_start <- header_row + 1L
+  data_end <- header_row + nrow(data)
+
+  wb <- wb_add_data(
+    wb, sheet, x = matrix(headers, nrow = 1),
+    start_row = header_row, start_col = start_col, col_names = FALSE
+  )
+  wb <- wb_add_font(wb, sheet, dims = header_dims, bold = TRUE)
+  wb <- wb_add_cell_style(
+    wb, sheet, dims = header_dims,
+    wrap_text = TRUE, horizontal = "center", vertical = "center"
+  )
+  wb <- wb_add_border(
+    wb, sheet, dims = header_dims,
+    bottom_border = "thin",
+    top_border = "none",
+    left_border = "none",
+    right_border = "none"
+  )
+  wb <- wb_set_row_heights(wb, sheet, rows = header_row, heights = 60)
+  wb <- wb_add_data(
+    wb, sheet, x = data,
+    start_row = data_start, start_col = start_col,
+    col_names = FALSE, na = "", apply_cell_style = FALSE
+  )
+  wb <- wb_add_numfmt(
+    wb, sheet,
+    dims = wb_dims(
+      rows = data_start:data_end,
+      cols = (start_col + first_numeric - 1L):end_col
+    ),
+    numfmt = number_format
+  )
+  for (row in which(data[[1]] == "Total") + header_row) {
+    total_dims <- wb_dims(rows = row, cols = start_col:end_col)
+    wb <- wb_add_font(wb, sheet, dims = total_dims, bold = TRUE)
+    wb <- wb_add_border(
+      wb, sheet, dims = total_dims,
+      top_border = "thin",
+      bottom_border = "thin",
+      left_border = "none",
+      right_border = "none"
+    )
+    wb <- wb_set_row_heights(wb, sheet, rows = row, heights = 18)
+  }
+  wb_set_col_widths(wb, sheet, cols = start_col:end_col, widths = col_width)
+}
+
+wb <- wb_workbook()
+wb <- wb_add_worksheet(wb, "Readme")
+readme_notes <- c(
+  "European Commission, Joint Research Centre (JRC)",
+  "Fish provisioning ecosystem service accounts",
+  paste0(
+    "Base year ", base_year,
+    ". Resource rent in thousand euro. Constant prices use Eurostat HICP for EU-27."
+  ),
+  "Country is the STECF Member State where the catch was landed (Eq. 2), shown as the ISO name.",
+  "Left table (column A): sea region by landing country by fish type. Missing fish types are filled with zero.",
+  "Right table (column K): sea region by landing country, without fish type.",
+  "Fish type is the water-column typology (Type in the original script). Unmatched codes are unclassified.",
+  "EEZ supply tables (methods Tables 10 to 13) need coastal-state EEZ polygons, which are not in the repository.",
+  "Real change is the year-on-year change in 2008 euro. Blank in the base year and when the previous value is zero.",
+  "ROW is rest of world and is not shown on the European map.",
+  "Source: STECF 2025 Fleet Economic data call."
+)
+wb <- wb_add_data(wb, "Readme", x = readme_notes, col_names = FALSE)
+wb <- wb_add_cell_style(
+  wb, "Readme",
+  dims = wb_dims(rows = seq_along(readme_notes), cols = 1),
+  wrap_text = TRUE
+)
+wb <- wb_set_col_widths(wb, "Readme", cols = 1, widths = 80)
+
+for (y in result_years) {
+  year_name <- as.character(y)
+  wb <- wb_add_worksheet(wb, year_name)
+  wb <- write_banner(
+    wb, year_name, y, detail_start, length(detail_headers),
+    "Sea region by landing country by fish type."
+  )
+  wb <- write_banner(
+    wb, year_name, y, summary_start, length(summary_headers),
+    "Sea region by landing country."
+  )
+  wb <- write_table(wb, year_name, sheet_detail(y), detail_start, detail_headers)
+  wb <- write_table(wb, year_name, sheet_summary(y), summary_start, summary_headers)
+  spacer_cols <- (detail_start + length(detail_headers)):(summary_start - 1L)
+  wb <- wb_set_col_widths(wb, year_name, cols = spacer_cols, widths = spacer_width)
+  wb <- wb_freeze_pane(
+    wb, year_name,
+    first_active_row = header_row + 1L, first_active_col = 1L
+  )
+}
+
+wb_save(
+  wb,
+  file.path(results_dir, "fish_provisioning_results.xlsx"),
+  overwrite = TRUE
 )
 
 ```
@@ -928,6 +1162,14 @@ Two layers are published. The macro layer is the four pan-European sea regions; 
 joins on `F_CODE`, or on `F_DIVISION` when that code is unique to one feature, which is how the
 collapsed NEAO recodes find the dissolved polygons. Price is the quantity-weighted average,
 revenue over live weight, not a sum of prices.
+
+There is no EEZ layer. `marine_regions.gpkg` is FAO fishing-area geometry only, and
+`fish_provisioning.gpkg` therefore has the same two result layers. Methods Tables 10 to 13 and
+the annex maps split supply by coastal-state EEZ inside each sea region. That needs an EEZ
+polygon layer, which was not delivered with the source shapefiles. Landing-country tables use
+STECF `country_code` (Eq. 2) and must not be drawn as if they were EEZs: the Member State of
+landing is not the coastal state of the fishing ground. Once EEZ geometry arrives, join a
+year-column summary to it the same way as the macro layer; do not explode polygons by year.
 
 Mediterranean accounts use GFCM sub-areas (`sa1` to `sa27`) while the geometry is FAO `37.x.x`, so
 the GSA lookup is applied before the join. Black Sea sub-areas `sa28` to `sa30` are not in that
@@ -1118,7 +1360,7 @@ tibble(
   Description = c(
     "Species-country-sub-region panel, 2008 to 2023, including 2008-euro rent",
     "The same panel as a single Excel sheet",
-    "Aggregate supply by sea region, one year per sheet, with real change",
+    "Two tables per year: sea region by country by fish type (column A) and by country (column K)",
     "Observed resource-rent prices used in gap filling",
     "Landings that could not be valued",
     "Macro and division polygons with tonnes, nominal rent and 2008-euro rent"
@@ -1159,6 +1401,11 @@ not force a rewrite.
   keeps the first entry; the correct entry should be chosen and the workbook corrected at source.
 - **Mediterranean sub-areas `sa11.1` and `sa11.2`.** See the warning above; these currently fall
   into `ROW`.
+- **EEZ geometry.** Coastal-state EEZ polygons were not in the source GIS bundle. Eq. 2 country
+  tables use landing Member State. EEZ supply tables and maps wait on that geometry.
+- **Overuse / sustainability score.** Not wired. The lookup is `data/lookup/Overuse_Total.xlsx`;
+  the method is chapter 4.5 of the methods report and `reference/AP_Deliverable4.pdf`. Apply it
+  after allocation, as a last step like HICP, not inside Eq. 3 to 7.
 
 # References
 

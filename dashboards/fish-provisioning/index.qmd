@@ -27,6 +27,14 @@ reference_year <- 2023
 base_year <- 2008
 
 fish_provisioning <- readRDS("data/outputs/results/fish_provisioning.RDS")
+country_names <- readr::read_csv(
+  "data/stecf/country_codes.csv",
+  show_col_types = FALSE
+) |>
+  transmute(country_code = `alpha-3`, country = name) |>
+  mutate(
+    country = recode(country, `Netherlands, Kingdom of the` = "Netherlands")
+  )
 macro <- st_read(
   "data/outputs/gis/fish_provisioning.gpkg",
   layer = "sea_regions_macro",
@@ -58,6 +66,36 @@ by_sea_year <- fish_provisioning |>
     real_change_pct = 100 *
       (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
     .by = Sea_reg
+  )
+
+by_sea_country_year <- fish_provisioning |>
+  filter(Sea_reg != "unknown") |>
+  left_join(country_names, by = "country_code") |>
+  mutate(
+    country = coalesce(country, country_code),
+    Sea_reg = factor(Sea_reg, levels = sea_order)
+  ) |>
+  summarise(
+    landed_tonnes = sum(landed_tonnes),
+    revenue_thousand_eur = sum(revenue_thousand_eur),
+    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    .by = c(year, Sea_reg, country)
+  ) |>
+  mutate(
+    price_eur_per_kg_2008 = if_else(
+      landed_tonnes > 0,
+      revenue_thousand_eur_2008 / landed_tonnes,
+      NA_real_
+    )
+  ) |>
+  arrange(Sea_reg, country, year) |>
+  mutate(
+    real_change_pct = if_else(
+      lag(revenue_thousand_eur_2008) > 0,
+      100 * (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
+      NA_real_
+    ),
+    .by = c(Sea_reg, country)
   )
 
 panel_years <- sort(unique(by_sea_year$year), decreasing = TRUE)
@@ -143,13 +181,78 @@ supply_gt <- function(y) {
       price_eur_per_kg_2008 = "Price (2008 €/kg)",
       real_change_pct = "Real change (%)"
     ) |>
-    fmt_number(landed_tonnes, decimals = 0) |>
-    fmt_number(revenue_thousand_eur, decimals = 0) |>
-    fmt_number(revenue_thousand_eur_2008, decimals = 0) |>
+    fmt_number(landed_tonnes, decimals = 2) |>
+    fmt_number(revenue_thousand_eur, decimals = 2) |>
+    fmt_number(revenue_thousand_eur_2008, decimals = 2) |>
     fmt_number(price_eur_per_kg_2008, decimals = 2) |>
-    fmt_number(real_change_pct, decimals = 1) |>
+    fmt_number(real_change_pct, decimals = 2) |>
     tab_source_note(
       "Real change is the year-on-year change in 2008 euro. Blank in 2008. 2024 is excluded because expenditure was not reported."
+    )
+}
+
+sea_country_gt <- function(y) {
+  by_row <- by_sea_country_year |>
+    filter(year == y) |>
+    arrange(Sea_reg, country)
+  totals <- by_row |>
+    summarise(
+      landed_tonnes = sum(landed_tonnes),
+      revenue_thousand_eur = sum(revenue_thousand_eur),
+      revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008)
+    ) |>
+    mutate(
+      price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes,
+      prev_total = sum(
+        by_sea_country_year$revenue_thousand_eur_2008[
+          by_sea_country_year$year == y - 1
+        ]
+      ),
+      real_change_pct = if_else(
+        prev_total > 0,
+        100 * (revenue_thousand_eur_2008 / prev_total - 1),
+        NA_real_
+      )
+    )
+  bind_rows(
+    by_row |>
+      transmute(
+        Sea_reg = as.character(Sea_reg),
+        country,
+        landed_tonnes,
+        revenue_thousand_eur,
+        revenue_thousand_eur_2008,
+        price_eur_per_kg_2008,
+        real_change_pct
+      ),
+    totals |>
+      transmute(
+        Sea_reg = "Total",
+        country = "",
+        landed_tonnes,
+        revenue_thousand_eur,
+        revenue_thousand_eur_2008,
+        price_eur_per_kg_2008,
+        real_change_pct
+      )
+  ) |>
+    gt() |>
+    cols_label(
+      Sea_reg = "Sea region",
+      country = "Country",
+      landed_tonnes = "Landings (tonnes)",
+      revenue_thousand_eur = "Resource rent (thousand nominal €)",
+      revenue_thousand_eur_2008 = "Resource rent (thousand 2008 €)",
+      price_eur_per_kg_2008 = "Price (2008 €/kg)",
+      real_change_pct = "Real change (%)"
+    ) |>
+    fmt_number(landed_tonnes, decimals = 2) |>
+    fmt_number(revenue_thousand_eur, decimals = 2) |>
+    fmt_number(revenue_thousand_eur_2008, decimals = 2) |>
+    fmt_number(price_eur_per_kg_2008, decimals = 2) |>
+    fmt_number(real_change_pct, decimals = 2) |>
+    tab_source_note(
+      "Sea region by landing country. Country is the STECF Member State of landing (Eq. 2)."
     )
 }
 
@@ -249,12 +352,42 @@ change in 2008 euro. The base year is the first year of the panel and can be swi
 in one line if the client prefers 2023 constant prices.
 :::
 
+# Use
+
+## Row {height="12%"}
+
+::: {.card}
+Use table of Eq. 2: sea region by Member State of landing. This is the compact summary
+without fish type. ROW is rest of world.
+:::
+
+## Row {height="88%"}
+
+::: {.card title="Sea region × landing country (2008 euro)"}
+::: {.panel-tabset}
+
+```{r}
+#| label: country-tabs
+#| results: asis
+
+for (y in panel_years) {
+  cat("\n### ", y, "\n\n", sep = "")
+  print(sea_country_gt(y))
+  cat("\n")
+}
+```
+
+:::
+:::
+
 # Maps
 
 ## Row {height="12%"}
 
 ::: {.card}
-Choropleths show the four Marine Strategy Framework Directive regions only. ROW was
+Choropleths show the four Marine Strategy Framework Directive regions only. There is no EEZ
+layer in the published GeoPackage. Landing-country tables are Eq. 2 (Member State of landing)
+and are not drawn as coastal waters. ROW was
 `r round(row_share_2023)` percent of 2023 tonnage and falls outside the European
 map. Value and price are 2008 euro.
 :::

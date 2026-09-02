@@ -37,7 +37,7 @@ observed prices in three widening passes: same country, then same sub-region, th
 - `data/gisdata/` holds `marine_regions.gpkg` and the script that built it.
 - `data/outputs/results/` holds the published tables: `fish_provisioning.RDS` and a matching
   flat `fish_provisioning.xlsx`, plus `fish_provisioning_results.xlsx` (aggregate supply, one
-  year per sheet). `data/outputs/gis/fish_provisioning.gpkg` holds the map layers. These are
+  year per sheet, sea region by landing country by fish type). `data/outputs/gis/fish_provisioning.gpkg` holds the map layers. These are
   versioned so they can be downloaded from the repo.
 
 # Data
@@ -150,9 +150,101 @@ column per year for landings, resource rent (nominal and 2008 euro) and price. S
 and fleet stay in the RDS and Excel files. Splitting into three files, one per metric, would
 triplicate the geometry for no gain.
 
+**SUT grains in the methods report.** Eq. 1 is supply by marine region (`Sea_reg`). Eq. 2 is use by
+landing country: STECF `country_code` is the three-letter Member State where the catch is landed
+(BEL, BGR, CYP, DEU, DNK, ESP, EST, FIN, FRA, GRC, HRV, IRL, ITA, LTU, LVA, MLT, NLD, POL, PRT,
+ROU, SVN, SWE). Tables 4 to 7 nest `species_group` (original `Type_1`: fish / shellfish / other)
+with `fish_type` (original `Type`: benthic, benthopelagic, demersal, pelagic; unmatched codes are
+"Not identified"). Tables 8 and 9 are sea region by landing country. Tables 10 to 13 and annexes
+1-15 (2018) and 16-35 (2023) are the nested layout inside one sea: supply rows are FAO/ICES
+sub-regions (`sub_reg_clean`); use rows are landing countries. Column structure is Fish
+(benthopelagic, demersal, pelagic), Shellfish (benthic, benthopelagic, demersal, pelagic), Others
+(Not identified), Total. Empty cells were printed as dashes. Supply totals must equal use totals
+at every grain; Baltic 2018 physical is 679,442.38 t on both sides.
+
+**EEZ naming compromise (client decision, 2026-09-01).** STECF has no coastal-state EEZ field, and
+no EEZ polygons will arrive. The methods report already labelled FAO statistical areas as
+"Baltic EEZ" (and the same stub on the use table, whose rows are countries). We follow that:
+`sub_reg_clean` is published as EEZ in the supply tables, with an explanatory note that these are
+FAO/GFCM fishing areas used as the spatial unit of supply, not legal exclusive economic zones.
+Do not invent EEZ polygons. Maps stay on FAO layers in `marine_regions.gpkg`. If true EEZ geometry
+ever appears, join a compact year-column summary without exploding polygons by year.
+
+**SUT Excel deliverable (not yet built).** Replace the current long tidy
+`fish_provisioning_results.xlsx` with report-style accounting tables, written in the
+`write-outputs` chunk of `documentation/methods/marine-processing/index.qmd` (`openxlsx2`). Source
+is `fish_provisioning` (2008-2023). Pivot `species_group` × `fish_type` wide; fill missing
+combinations. Three metrics: physical (tonnes), nominal thousand euro, thousand 2008 euro. For
+each metric, a supply table and a use table. Identity check: row Total on supply equals row Total
+on use. Country names from `data/stecf/country_codes.csv`. Keep the flat `fish_provisioning.xlsx`
+panel as the machine-readable file.
+
+Replicable from our panel, one-to-one with `reference/marine-methods.docx` chapter 4:
+
+- Tables 2-3: Europe SUT by fishing region (Baltic, Black, Mediterranean, NEAO, ROW, unknown).
+  Use sits in the primary-sector / fisheries column, as in the report.
+- Tables 4-5: Europe supply, nested fish type × fishing region, physical and monetary.
+- Tables 6-7: Europe use, landing country × nested fish type, physical and monetary.
+- Tables 8-9: landing country × fishing region (origin of the flow).
+- Tables 10-13: Baltic nested SUT; supply by `sub_reg_clean` labelled EEZ; use by country.
+- Annexes 1-15 and 16-35: the same nested SUT for Black Sea, Mediterranean, NEAO (and 2023
+  vintages). We can also produce every year 2008-2023, not only 2018 and 2023.
+- Tables 14-15: 2018 vs 2023 comparison (physical, and monetary at constant prices).
+
+Out of scope for this SUT workbook: overuse Tables 16-24 (see overuse handover); blue carbon
+Tables 25-32.
+
+**Excel formatting (current tidy workbook, until SUTs replace it).** Written in `write-outputs`
+with `openxlsx2`. Rows 1 to 3 are JRC / title / year, row 4 blank, row 5 wrapped bold headers,
+Total last. Column width 10. 1 pt line under headers; 1 pt lines above and below Total.
+Numerics `#,##0.00`. `writexl` is only for the flat panel. Keep the writer in the processing
+page; no Python and no standalone helper file.
+
+**STECF has no EEZ field.** The three 2025 data-call workbooks were checked: fleet segment
+(`STECF_25 07_EU Fleet Economic and Transversal data_fleet segment level.xlsx`), FAO landings
+(`STECF_25 07_Landings_fao.xlsx`), and national level
+(`STECF_25-07_EU Fleet Economic and Transversal data_national level.xlsx`). Geography in all three
+is Member State of the fleet or landing (`country_code`, `country_name`) plus FAO/GFCM fishing area
+of the catch (`sub_reg`, `supra_reg`). `geo_indicator` is outermost-region fleet geography (IC,
+GP, MQ, RE, YT, GF, MA, Azores P2/P3, and so on). `codes__regions_sub-regions` maps sub-region to
+FAO area and GSA. National `MS_landings` has species but no sub-region. That is why the tables
+use `sub_reg_clean` under the EEZ label, with a note.
+
+# Overuse / sustainability score (not implemented)
+
+Do not fold this into Eq. 3 to 7. Apply it after allocation, as a last step like HICP deflation.
+
+Source method: `reference/marine-methods.docx` chapter 4.5, and `reference/AP_Deliverable4.pdf`
+(BioMESES Deliverable 4, Peris Tamayo 2024). Wild-capture **FSI** uses FAO GFCM (Mediterranean and
+Black Sea) plus ICES (Baltic and NEAO); fishing-mortality score plus stock-abundance score; total
+score maps to risk (methods Table 17 / D4 Table 1): critical -4.00 to -0.01, zero or no data 0,
+high 0.01 to 3.44, intermediate 3.45 to 5.44, low 5.45 to 7.44, riskless 7.45 to 8.00. Methods
+Table 18 converts the integer score to an overuse share of actual flow: critical 100%, score 1 ->
+90%, 2 -> 70%, 3 -> 50%, 4 -> 40%, 5 -> 30%, 6 -> 20%, 7 -> 10%, 8 -> 0%. Sustainable flow is (1 - share)
+times landings; overuse is share times landings; monetary overuse is that times resource rent.
+Restricted to the top species with stock assessments (methods Table 19; D4 is the top 10 from
+Deliverable 3). Reported at Europe, marine region, and country EEZ. Aquaculture **ASI** is a
+separate eutrophication score from EMODnet points; out of scope unless asked.
+
+`data/lookup/Overuse_Total.xlsx` is a 2018-era worked example, already multiplied through, not a
+raw score table to join blindly onto 2008-2023. Sheets: Baltic Sea, Black Sea, Med Sea, NEAO,
+Total. First column is species code (COD, ELE, HER, …); join on `species_code` plus sea region.
+Columns include Initial Score, Score, Risk level, Percentage of overuse flow, landing STECF (ton),
+Sustainable flow, Overuse, Overuse_monetary. Scores differ by sea (COD is 1 in the Baltic and 2 in
+NEAO). Species coverage differs by sea (TUR only in the Black Sea). The original processing script
+has no overuse code; those fields on the old shapefiles (`OversusTon`, `OveruseTon`, …) were a
+later QGIS join. Do not extend that DBF-truncated naming.
+
+D4 annex zips A1-A10 (CSVs plus EEZ and marine-region spatial layers) are not in this repo. EEZ
+fish-capture maps were `A6_EEZ_Fishcapture.zip`.
+
 # Open work
 
 1. Confirm the 2008 base year with the client; switch `base_year` if they prefer 2023 constant prices.
 2. Resolve the open items above: `subinvest`, `sa11.1` and `sa11.2`, the duplicate species codes,
    and confirm that `Type` and `Type_1` in the published tables correspond to our `fish_type` and
    `species_group`.
+3. Rebuild `fish_provisioning_results.xlsx` as the report SUTs (see SUT Excel deliverable). Label
+   `sub_reg_clean` as EEZ on supply tables and add the explanatory note. Do not invent EEZ polygons.
+4. Wire overuse / FSI after allocation. See the overuse handover; do not start from the original
+   script.
