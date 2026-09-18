@@ -24,7 +24,7 @@ library(gt)
 sf_use_s2(FALSE)
 
 reference_year <- 2023
-base_year <- 2008
+base_year <- 2010
 
 fish_provisioning <- readRDS("data/outputs/results/fish_provisioning.RDS")
 country_names <- readr::read_csv(
@@ -42,61 +42,164 @@ macro <- st_read(
 )
 
 sea_order <- c(
-  "NEAO", "Baltic Sea", "Mediterranean Sea", "Black Sea", "ROW"
+  "Baltic Sea", "Black Sea", "Mediterranean Sea", "NEAO", "ROW", "unknown"
 )
+nested_seas <- c(
+  "Baltic Sea", "Black Sea", "Mediterranean Sea", "NEAO", "ROW"
+)
+
+sut_value_cols <- c(
+  "fish_benthopelagic", "fish_demersal", "fish_pelagic",
+  "shellfish_benthic", "shellfish_benthopelagic",
+  "shellfish_demersal", "shellfish_pelagic",
+  "other_not_identified"
+)
+
+sut_type_labels <- c(
+  fish_benthopelagic = "benthopelagic",
+  fish_demersal = "demersal",
+  fish_pelagic = "pelagic",
+  shellfish_benthic = "benthic",
+  shellfish_benthopelagic = "benthopelagic",
+  shellfish_demersal = "demersal",
+  shellfish_pelagic = "pelagic",
+  other_not_identified = "Not identified",
+  Total = "Total"
+)
+
+prepare_sut_types <- function(data) {
+  data |>
+    mutate(
+      species_group = case_when(
+        species_group == "fish" ~ "fish",
+        species_group == "shellfish" ~ "shellfish",
+        .default = "other"
+      ),
+      fish_type = case_when(
+        species_group == "other" ~ "not_identified",
+        is.na(fish_type) ~ "not_identified",
+        .default = fish_type
+      ),
+      species_group = factor(species_group, c("fish", "shellfish", "other")),
+      fish_type = factor(
+        fish_type,
+        c("benthic", "benthopelagic", "demersal", "pelagic", "not_identified")
+      )
+    )
+}
+
+nested_sut <- function(data, row_var, value_var) {
+  wide <- data |>
+    prepare_sut_types() |>
+    summarise(
+      value = sum(.data[[value_var]], na.rm = TRUE),
+      .by = all_of(c(row_var, "species_group", "fish_type"))
+    ) |>
+    pivot_wider(
+      names_from = c(species_group, fish_type),
+      values_from = value,
+      names_sep = "_",
+      values_fill = 0,
+      names_expand = TRUE
+    )
+
+  missing_cols <- setdiff(sut_value_cols, names(wide))
+  for (col in missing_cols) {
+    wide[[col]] <- 0
+  }
+
+  wide |>
+    mutate(Total = rowSums(across(all_of(sut_value_cols)), na.rm = TRUE)) |>
+    filter(Total != 0) |>
+    select(all_of(row_var), all_of(sut_value_cols), Total) |>
+    arrange(across(all_of(row_var)))
+}
+
+add_total_row <- function(tbl, row_var) {
+  totals <- tbl |>
+    summarise(across(where(is.numeric), \(x) sum(x, na.rm = TRUE))) |>
+    mutate(!!row_var := "Total", .before = 1)
+  bind_rows(tbl, totals)
+}
+
+sea_sut <- function(year, sea, side, value_var) {
+  slice <- fish_provisioning |>
+    filter(year == .env$year, Sea_reg == .env$sea)
+  if (side == "supply") {
+    nested_sut(slice, "sub_reg_clean", value_var) |>
+      add_total_row("sub_reg_clean") |>
+      rename(EEZ = sub_reg_clean)
+  } else {
+    slice |>
+      left_join(country_names, by = "country_code") |>
+      mutate(country = coalesce(country, country_code)) |>
+      nested_sut("country", value_var) |>
+      add_total_row("country") |>
+      rename(Country = country)
+  }
+}
+
+sut_gt <- function(tbl, title) {
+  row_col <- names(tbl)[1]
+  tbl |>
+    gt(rowname_col = row_col) |>
+    cols_label(.list = as.list(sut_type_labels)) |>
+    tab_spanner("Fish", c(fish_benthopelagic, fish_demersal, fish_pelagic)) |>
+    tab_spanner(
+      "Shellfish",
+      c(
+        shellfish_benthic, shellfish_benthopelagic,
+        shellfish_demersal, shellfish_pelagic
+      )
+    ) |>
+    tab_spanner("Others", other_not_identified) |>
+    fmt_number(decimals = 2) |>
+    tab_header(title = title) |>
+    tab_stubhead(label = row_col)
+}
+
+print_sea_year <- function(y, sea) {
+  has_rows <- any(
+    fish_provisioning$year == y & fish_provisioning$Sea_reg == sea
+  )
+  if (!has_rows) {
+    return(invisible())
+  }
+  print(sut_gt(
+    sea_sut(y, sea, "supply", "landed_tonnes"),
+    paste0(sea, " supply, physical (t), ", y)
+  ))
+  print(sut_gt(
+    sea_sut(y, sea, "use", "landed_tonnes"),
+    paste0(sea, " use, physical (t), ", y)
+  ))
+  print(sut_gt(
+    sea_sut(y, sea, "supply", "revenue_thousand_eur_constant"),
+    paste0(sea, " supply, thousand ", base_year, " euro, ", y)
+  ))
+  print(sut_gt(
+    sea_sut(y, sea, "use", "revenue_thousand_eur_constant"),
+    paste0(sea, " use, thousand ", base_year, " euro, ", y)
+  ))
+}
 
 by_sea_year <- fish_provisioning |>
   filter(Sea_reg != "unknown") |>
   summarise(
     landed_tonnes = sum(landed_tonnes),
     revenue_thousand_eur = sum(revenue_thousand_eur),
-    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
+    revenue_thousand_eur_constant = sum(revenue_thousand_eur_constant),
     .by = c(year, Sea_reg)
   ) |>
   mutate(
-    price_eur_per_kg_2008 = if_else(
+    price_eur_per_kg_constant = if_else(
       landed_tonnes > 0,
-      revenue_thousand_eur_2008 / landed_tonnes,
+      revenue_thousand_eur_constant / landed_tonnes,
       NA_real_
     ),
     Sea_reg = factor(Sea_reg, levels = sea_order)
   ) |>
-  arrange(Sea_reg, year) |>
-  mutate(
-    real_change_pct = 100 *
-      (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
-    .by = Sea_reg
-  )
-
-by_sea_country_year <- fish_provisioning |>
-  filter(Sea_reg != "unknown") |>
-  left_join(country_names, by = "country_code") |>
-  mutate(
-    country = coalesce(country, country_code),
-    Sea_reg = factor(Sea_reg, levels = sea_order)
-  ) |>
-  summarise(
-    landed_tonnes = sum(landed_tonnes),
-    revenue_thousand_eur = sum(revenue_thousand_eur),
-    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008),
-    .by = c(year, Sea_reg, country)
-  ) |>
-  mutate(
-    price_eur_per_kg_2008 = if_else(
-      landed_tonnes > 0,
-      revenue_thousand_eur_2008 / landed_tonnes,
-      NA_real_
-    )
-  ) |>
-  arrange(Sea_reg, country, year) |>
-  mutate(
-    real_change_pct = if_else(
-      lag(revenue_thousand_eur_2008) > 0,
-      100 * (revenue_thousand_eur_2008 / lag(revenue_thousand_eur_2008) - 1),
-      NA_real_
-    ),
-    .by = c(Sea_reg, country)
-  )
+  arrange(Sea_reg, year)
 
 panel_years <- sort(unique(by_sea_year$year), decreasing = TRUE)
 
@@ -108,10 +211,7 @@ totals_2023 <- by_sea_2023 |>
   summarise(
     landed_tonnes = sum(landed_tonnes),
     revenue_thousand_eur = sum(revenue_thousand_eur),
-    revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008)
-  ) |>
-  mutate(
-    price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes
+    revenue_thousand_eur_constant = sum(revenue_thousand_eur_constant)
   )
 
 row_share_2023 <- 100 *
@@ -121,8 +221,8 @@ row_share_2023 <- 100 *
 macro_2023 <- macro |>
   mutate(
     landed_tonnes = tonnes_2023,
-    revenue_thousand_eur_2008 = rent08_k_eur_2023,
-    price_eur_per_kg_2008 = price08_eur_kg_2023,
+    revenue_thousand_eur_constant = rent_const_k_eur_2023,
+    price_eur_per_kg_constant = price_const_eur_kg_2023,
     Sea_label = recode(
       Sea_name,
       NEAO = "North East Atlantic",
@@ -131,130 +231,6 @@ macro_2023 <- macro |>
       Baltic = "Baltic Sea"
     )
   )
-
-supply_gt <- function(y) {
-  by_sea <- by_sea_year |>
-    filter(year == y) |>
-    arrange(Sea_reg)
-  totals <- by_sea |>
-    summarise(
-      landed_tonnes = sum(landed_tonnes),
-      revenue_thousand_eur = sum(revenue_thousand_eur),
-      revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008)
-    ) |>
-    mutate(
-      price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes,
-      prev_total = sum(
-        by_sea_year$revenue_thousand_eur_2008[by_sea_year$year == y - 1]
-      ),
-      real_change_pct = if_else(
-        prev_total > 0,
-        100 * (revenue_thousand_eur_2008 / prev_total - 1),
-        NA_real_
-      )
-    )
-  bind_rows(
-    by_sea |>
-      transmute(
-        Sea_reg = as.character(Sea_reg),
-        landed_tonnes,
-        revenue_thousand_eur,
-        revenue_thousand_eur_2008,
-        price_eur_per_kg_2008,
-        real_change_pct
-      ),
-    totals |>
-      transmute(
-        Sea_reg = "Total",
-        landed_tonnes,
-        revenue_thousand_eur,
-        revenue_thousand_eur_2008,
-        price_eur_per_kg_2008,
-        real_change_pct
-      )
-  ) |>
-    gt(rowname_col = "Sea_reg") |>
-    cols_label(
-      landed_tonnes = "Landings (tonnes)",
-      revenue_thousand_eur = "Resource rent (thousand nominal €)",
-      revenue_thousand_eur_2008 = "Resource rent (thousand 2008 €)",
-      price_eur_per_kg_2008 = "Price (2008 €/kg)",
-      real_change_pct = "Real change (%)"
-    ) |>
-    fmt_number(landed_tonnes, decimals = 2) |>
-    fmt_number(revenue_thousand_eur, decimals = 2) |>
-    fmt_number(revenue_thousand_eur_2008, decimals = 2) |>
-    fmt_number(price_eur_per_kg_2008, decimals = 2) |>
-    fmt_number(real_change_pct, decimals = 2) |>
-    tab_source_note(
-      "Real change is the year-on-year change in 2008 euro. Blank in 2008. 2024 is excluded because expenditure was not reported."
-    )
-}
-
-sea_country_gt <- function(y) {
-  by_row <- by_sea_country_year |>
-    filter(year == y) |>
-    arrange(Sea_reg, country)
-  totals <- by_row |>
-    summarise(
-      landed_tonnes = sum(landed_tonnes),
-      revenue_thousand_eur = sum(revenue_thousand_eur),
-      revenue_thousand_eur_2008 = sum(revenue_thousand_eur_2008)
-    ) |>
-    mutate(
-      price_eur_per_kg_2008 = revenue_thousand_eur_2008 / landed_tonnes,
-      prev_total = sum(
-        by_sea_country_year$revenue_thousand_eur_2008[
-          by_sea_country_year$year == y - 1
-        ]
-      ),
-      real_change_pct = if_else(
-        prev_total > 0,
-        100 * (revenue_thousand_eur_2008 / prev_total - 1),
-        NA_real_
-      )
-    )
-  bind_rows(
-    by_row |>
-      transmute(
-        Sea_reg = as.character(Sea_reg),
-        country,
-        landed_tonnes,
-        revenue_thousand_eur,
-        revenue_thousand_eur_2008,
-        price_eur_per_kg_2008,
-        real_change_pct
-      ),
-    totals |>
-      transmute(
-        Sea_reg = "Total",
-        country = "",
-        landed_tonnes,
-        revenue_thousand_eur,
-        revenue_thousand_eur_2008,
-        price_eur_per_kg_2008,
-        real_change_pct
-      )
-  ) |>
-    gt() |>
-    cols_label(
-      Sea_reg = "Sea region",
-      country = "Country",
-      landed_tonnes = "Landings (tonnes)",
-      revenue_thousand_eur = "Resource rent (thousand nominal €)",
-      revenue_thousand_eur_2008 = "Resource rent (thousand 2008 €)",
-      price_eur_per_kg_2008 = "Price (2008 €/kg)",
-      real_change_pct = "Real change (%)"
-    ) |>
-    fmt_number(landed_tonnes, decimals = 2) |>
-    fmt_number(revenue_thousand_eur, decimals = 2) |>
-    fmt_number(revenue_thousand_eur_2008, decimals = 2) |>
-    fmt_number(price_eur_per_kg_2008, decimals = 2) |>
-    fmt_number(real_change_pct, decimals = 2) |>
-    tab_source_note(
-      "Sea region by landing country. Country is the STECF Member State of landing (Eq. 2)."
-    )
-}
 
 choropleth <- function(data, fill, legend) {
   ggplot(data) +
@@ -301,11 +277,11 @@ list(value = fmt_tonnes(totals_2023$landed_tonnes))
 
 ```{r}
 #| content: valuebox
-#| title: "2023 resource rent, 2008 euro"
+#| title: "2023 resource rent, 2010 euro"
 #| icon: currency-euro
 #| color: secondary
 
-list(value = fmt_million_eur(totals_2023$revenue_thousand_eur_2008))
+list(value = fmt_million_eur(totals_2023$revenue_thousand_eur_constant))
 ```
 
 ```{r}
@@ -317,63 +293,41 @@ list(value = fmt_million_eur(totals_2023$revenue_thousand_eur_2008))
 list(value = paste0(round(row_share_2023), "%"))
 ```
 
-## Row {height="62%"}
-
-::: {.card title="Supply by sea region (2008 euro)"}
-::: {.panel-tabset}
-
-```{r}
-#| label: supply-tabs
-#| results: asis
-
-for (y in panel_years) {
-  cat("\n### ", y, "\n\n", sep = "")
-  print(supply_gt(y))
-  cat("\n")
-}
-```
-
-:::
-:::
-
-## Row {height="22%"}
-
-::: {.card}
-**Rest of world is off the map.** ROW was `r round(row_share_2023)` percent of 2023
-tonnage. Those landings were taken by EU fleets outside the four pan-European sea
-regions and cannot appear on a European choropleth. They remain in the tables and
-in the time series.
-:::
-
-::: {.card}
-**Monetary values are 2008 euro.** Resource rent is deflated with Eurostat HICP for
-EU-27. The allocation itself stays in nominal euro. Real change is the year-on-year
-change in 2008 euro. The base year is the first year of the panel and can be switched
-in one line if the client prefers 2023 constant prices.
-:::
-
-# Use
-
 ## Row {height="12%"}
 
 ::: {.card}
-Use table of Eq. 2: sea region by Member State of landing. This is the compact summary
-without fish type. ROW is rest of world.
+Nested supply and use tables follow methods Tables 10 to 13. Supply rows are FAO/GFCM fishing
+areas, labelled EEZ as the spatial unit of supply; they are not legal exclusive economic zones.
+Use rows are the Member State of landing. Columns are species group crossed with fish type.
+Supply Total equals use Total. Nominal euro tables are in the Excel workbook; the dashboard
+shows physical tonnes and 2010 euro.
 :::
+
+::: {.card}
+**Monetary values are 2010 euro.** Resource rent is deflated with Eurostat HICP for EU-27.
+The allocation itself stays in nominal euro. ROW is rest of world.
+:::
+
+# Supply and use
 
 ## Row {height="88%"}
 
-::: {.card title="Sea region × landing country (2008 euro)"}
+::: {.card title="Nested SUT by sea (physical and 2010 euro)"}
 ::: {.panel-tabset}
 
 ```{r}
-#| label: country-tabs
+#| label: sut-tabs
 #| results: asis
 
-for (y in panel_years) {
-  cat("\n### ", y, "\n\n", sep = "")
-  print(sea_country_gt(y))
-  cat("\n")
+for (sea in nested_seas) {
+  cat("\n### ", sea, "\n\n", sep = "")
+  cat("::: {.panel-tabset}\n\n")
+  for (y in panel_years) {
+    cat("\n#### ", y, "\n\n", sep = "")
+    print_sea_year(y, sea)
+    cat("\n")
+  }
+  cat("\n:::\n\n")
 }
 ```
 
@@ -385,11 +339,11 @@ for (y in panel_years) {
 ## Row {height="12%"}
 
 ::: {.card}
-Choropleths show the four Marine Strategy Framework Directive regions only. There is no EEZ
-layer in the published GeoPackage. Landing-country tables are Eq. 2 (Member State of landing)
-and are not drawn as coastal waters. ROW was
+Choropleths show the four Marine Strategy Framework Directive regions only. There is no legal-EEZ
+layer in the published GeoPackage. Supply tables label FAO/GFCM fishing areas as EEZ; use tables
+are Member State of landing. ROW was
 `r round(row_share_2023)` percent of 2023 tonnage and falls outside the European
-map. Value and price are 2008 euro.
+map. Value and price are 2010 euro.
 :::
 
 ## Row {.tabset height="88%"}
@@ -404,24 +358,24 @@ choropleth(macro_2023, landed_tonnes, "Tonnes") +
   labs(caption = "2023 live weight. ROW is not shown.")
 ```
 
-### Value (thousand 2008 €)
+### Value (thousand 2010 €)
 
 ```{r}
 #| fig-width: 10
 #| fig-height: 7
 
-choropleth(macro_2023, revenue_thousand_eur_2008, "Thousand\n2008 €") +
-  labs(caption = "2023 resource rent, 2008 euro. ROW is not shown.")
+choropleth(macro_2023, revenue_thousand_eur_constant, "Thousand\n2010 €") +
+  labs(caption = "2023 resource rent, 2010 euro. ROW is not shown.")
 ```
 
-### Price (2008 €/kg)
+### Price (2010 €/kg)
 
 ```{r}
 #| fig-width: 10
 #| fig-height: 7
 
-choropleth(macro_2023, price_eur_per_kg_2008, "2008 €/kg") +
-  labs(caption = "2023 quantity-weighted resource rent per kilogram, 2008 euro. ROW is not shown.")
+choropleth(macro_2023, price_eur_per_kg_constant, "2010 €/kg") +
+  labs(caption = "2023 quantity-weighted resource rent per kilogram, 2010 euro. ROW is not shown.")
 ```
 
 # Trends
@@ -448,12 +402,12 @@ by_sea_year |>
 ## Row
 
 ```{r}
-#| title: "Resource rent by sea region (2008 euro)"
+#| title: "Resource rent by sea region (2010 euro)"
 #| fig-width: 11
 #| fig-height: 4.5
 
 by_sea_year |>
-  ggplot(aes(year, revenue_thousand_eur_2008, colour = Sea_reg)) +
+  ggplot(aes(year, revenue_thousand_eur_constant, colour = Sea_reg)) +
   geom_line(linewidth = 0.9) +
   geom_point(size = 1.6) +
   scale_y_continuous(labels = scales::label_comma()) +
@@ -461,8 +415,8 @@ by_sea_year |>
   scale_colour_brewer(palette = "Dark2", name = NULL) +
   labs(
     x = NULL,
-    y = "Thousand 2008 €",
-    caption = "Constant 2008 euro, Eurostat HICP for EU-27. Year-on-year change is real change in the service."
+    y = "Thousand 2010 €",
+    caption = "Constant 2010 euro, Eurostat HICP for EU-27."
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")

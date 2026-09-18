@@ -33,11 +33,11 @@ observed prices in three widening passes: same country, then same sub-region, th
 - `documentation/FS-landings-data/index.qmd` documents the STECF data conversion.
 - `data/stecf/` holds the source workbook (gitignored), the conversion script, and two RDS outputs.
 - `data/lookup/` holds three curated Excel lookups plus `hicp_eu27.csv`, the Eurostat HICP series
-  used to deflate resource rent to 2008 euro.
+  used to deflate resource rent to 2010 euro.
 - `data/gisdata/` holds `marine_regions.gpkg` and the script that built it.
 - `data/outputs/results/` holds the published tables: `fish_provisioning.RDS` and a matching
-  flat `fish_provisioning.xlsx`, plus `fish_provisioning_results.xlsx` (aggregate supply, one
-  year per sheet, sea region by landing country by fish type). `data/outputs/gis/fish_provisioning.gpkg` holds the map layers. These are
+  flat `fish_provisioning.xlsx`, plus `fish_provisioning_results.xlsx` (report-style SUTs, one
+  year per sheet). `data/outputs/gis/fish_provisioning.gpkg` holds the map layers. These are
   versioned so they can be downloaded from the repo.
 
 # Data
@@ -61,7 +61,7 @@ series agree within three percent from 2009 to 2023.
 Lookups in `data/lookup/`: `3.classification_vs_OFFICIAL.xlsx` maps species code to water column
 type and to the fish, shellfish or other split; `Link_GSA_Marine regions_Mediterranean Sea.xlsx`
 maps GFCM sub-areas (`sa1` to `sa27`) to FAO Mediterranean divisions (`37.x.x`), which is required
-for any Mediterranean map; `Overuse_Total.xlsx` holds the overuse scores, not yet wired into code.
+for any Mediterranean map; `Overuse_Total.xlsx` holds the 2018 FSI scores joined after allocation.
 
 # Findings that must not be rediscovered
 
@@ -71,28 +71,34 @@ energy cost figures, and only 11 of 22 reported any income. The latest fully val
 
 **Subsidies are already included.** Operating subsidies are `totdirsub` inside
 `variable_group == "Income"`, so filtering to Income plus Expenditure captures them. Subsidies on
-investments (`subinvest`) sit under `Capital` and are excluded; Box 1 arguably includes them. Open.
+investments (`subinvest`) sit under `Capital` and stay excluded. Domenico will correct Box 1 so it
+no longer appears to include them.
 
 **Sub-region codes carry whitespace.** About 21,000 of 57,000 landing rows write `sa 21` rather than
 `sa21`. Whitespace must be stripped before any recode or join, or the entire Mediterranean fails to
 match silently.
 
 **Eight species codes are duplicated** in the classification workbook (CAS, RKQ, SCY, SHR, SJA, SRK,
-SSB, YRS). This is why the previous team did the species merge by hand in Excel; a plain join
-duplicates landings. The routine deduplicates and a check chunk lists them.
+SSB, YRS). Each pair is identical; `distinct(species_code)` is a safe delete (Domenico, Sep 2026).
 
-**`sa11.1` and `sa11.2` fall into ROW.** `assign_sea_region()` matches the literal list `sa1` to
-`sa27`, so the two decimal Mediterranean sub-areas are misclassified. Original behaviour was kept
-deliberately rather than silently changing published numbers. Open.
+**`sa11.1` and `sa11.2` are recoded to `sa11`.** They are Mediterranean GFCM areas. The 2023
+shapefile tonne anchors for Mediterranean and ROW therefore shift by that tonnage (about 20 t in
+2023). NEAO, Baltic and Black Sea still match `Tonnes_23`.
+
+**Type vs Type_1.** The classification workbook has no `Type_1`. `Type` is the water-column
+typology (`fish_type`: benthic, benthopelagic, demersal, pelagic). `species_group` (fish /
+shellfish / other) comes from the binary flags. Those names match methods Tables 4 to 13.
 
 **Three bugs in the original were fixed** and are documented in callouts on the processing page:
 the price table double counted collapsed sub-regions; the division guard tested the wrong column;
 and the two published unit conversions were computed on different bases.
 
-**Validation anchor.** Running the current `harmonise_sub_reg()` and `assign_sea_region()` over 2023
-landings gives, in tonnes, NEAO 1,925,814, Baltic 436,672, Mediterranean 308,722, Black Sea 9,961,
-ROW 713,131. The first four match the `Tonnes_23` attributes the previous team baked into
-`Macro_Division_European_Sea.shp` to the kilogram. Any refactor must still reproduce these.
+**Validation anchor.** Before the sa11 recode, 2023 landings in tonnes were NEAO 1,925,814, Baltic
+436,672, Mediterranean 308,722, Black Sea 9,961, ROW 713,131. The first four matched the
+`Tonnes_23` attributes the previous team baked into `Macro_Division_European_Sea.shp` to the
+kilogram. After recoding `sa11.1` and `sa11.2` into the Mediterranean, only NEAO, Baltic and Black
+Sea still match those integers; Med and ROW move by the sa11 decimals. Any other refactor of
+`harmonise_sub_reg()` or `assign_sea_region()` must still explain any further movement.
 
 # Geometry
 
@@ -138,23 +144,23 @@ excluded.
 
 Nominal euro is produced by the allocation. A single step at the end converts resource rent to
 constant prices with Eurostat HICP for EU-27. The base year is `base_year` in the processing
-parameters chunk and is currently 2008, the first year of the panel. Changing it is a one-line
-edit. Tables report nominal euro, 2008 euro, and year-on-year real change in 2008 euro.
+parameters chunk and is currently 2010 (JRC decision, September 2026). Changing it is a one-line
+edit. Tables report nominal euro and 2010 euro.
 
 The processing page builds the 2008-2023 panel in one pass. `year` is part of every grouping key
 and every gap-filling join, so there is no cross-year contamination. `reference_year` is kept for
 the live 2023 checks and the dashboard headline figures.
 
 The published GeoPackage is map grain only: one polygon per sea region or FAO division, with one
-column per year for landings, resource rent (nominal and 2008 euro) and price. Species, country
+column per year for landings, resource rent (nominal and constant euro) and price. Species, country
 and fleet stay in the RDS and Excel files. Splitting into three files, one per metric, would
 triplicate the geometry for no gain.
 
 **SUT grains in the methods report.** Eq. 1 is supply by marine region (`Sea_reg`). Eq. 2 is use by
 landing country: STECF `country_code` is the three-letter Member State where the catch is landed
 (BEL, BGR, CYP, DEU, DNK, ESP, EST, FIN, FRA, GRC, HRV, IRL, ITA, LTU, LVA, MLT, NLD, POL, PRT,
-ROU, SVN, SWE). Tables 4 to 7 nest `species_group` (original `Type_1`: fish / shellfish / other)
-with `fish_type` (original `Type`: benthic, benthopelagic, demersal, pelagic; unmatched codes are
+ROU, SVN, SWE). Tables 4 to 7 nest `species_group` (fish / shellfish / other)
+with `fish_type` (workbook `Type`: benthic, benthopelagic, demersal, pelagic; unmatched codes are
 "Not identified"). Tables 8 and 9 are sea region by landing country. Tables 10 to 13 and annexes
 1-15 (2018) and 16-35 (2023) are the nested layout inside one sea: supply rows are FAO/ICES
 sub-regions (`sub_reg_clean`); use rows are landing countries. Column structure is Fish
@@ -170,14 +176,19 @@ FAO/GFCM fishing areas used as the spatial unit of supply, not legal exclusive e
 Do not invent EEZ polygons. Maps stay on FAO layers in `marine_regions.gpkg`. If true EEZ geometry
 ever appears, join a compact year-column summary without exploding polygons by year.
 
-**SUT Excel deliverable (not yet built).** Replace the current long tidy
-`fish_provisioning_results.xlsx` with report-style accounting tables, written in the
-`write-outputs` chunk of `documentation/methods/marine-processing/index.qmd` (`openxlsx2`). Source
-is `fish_provisioning` (2008-2023). Pivot `species_group` × `fish_type` wide; fill missing
-combinations. Three metrics: physical (tonnes), nominal thousand euro, thousand 2008 euro. For
-each metric, a supply table and a use table. Identity check: row Total on supply equals row Total
-on use. Country names from `data/stecf/country_codes.csv`. Keep the flat `fish_provisioning.xlsx`
-panel as the machine-readable file.
+**SUT Excel deliverable.** Report-style accounting tables are written in the `write-outputs`
+chunk of `documentation/methods/marine-processing/index.qmd` (`openxlsx2`). Source is
+`fish_provisioning` (2008-2023). Pivot `species_group` × `fish_type` wide with `values_fill = 0`
+and `names_expand = TRUE`. Three metrics: physical (tonnes), nominal thousand euro, thousand 2010
+euro. For each metric, supply and use. Supply rows: `sub_reg_clean`, labelled EEZ, within
+`Sea_reg`. Use rows: landing country (ISO names from `data/stecf/country_codes.csv`). Identity:
+supply Total equals use Total at every grain. Europe Tables 2-9 sit at the top of each year
+sheet; nested Tables 10-13 follow per sea. Keep the flat `fish_provisioning.xlsx` panel.
+
+**Excel formatting.** Written in `write-outputs` with `openxlsx2`. Each stacked table has rows 1
+to 3 JRC / title / year, row 4 blank, two-row bold headers (species group then fish type), width
+10, 1 pt under headers, 1 pt above and below Total, `#,##0.00`. `writexl` is only for the flat
+panel. Keep the writer in the processing page; no Python and no standalone helper file.
 
 Replicable from our panel, one-to-one with `reference/marine-methods.docx` chapter 4:
 
@@ -191,14 +202,8 @@ Replicable from our panel, one-to-one with `reference/marine-methods.docx` chapt
   vintages). We can also produce every year 2008-2023, not only 2018 and 2023.
 - Tables 14-15: 2018 vs 2023 comparison (physical, and monetary at constant prices).
 
-Out of scope for this SUT workbook: overuse Tables 16-24 (see overuse handover); blue carbon
-Tables 25-32.
-
-**Excel formatting (current tidy workbook, until SUTs replace it).** Written in `write-outputs`
-with `openxlsx2`. Rows 1 to 3 are JRC / title / year, row 4 blank, row 5 wrapped bold headers,
-Total last. Column width 10. 1 pt line under headers; 1 pt lines above and below Total.
-Numerics `#,##0.00`. `writexl` is only for the flat panel. Keep the writer in the processing
-page; no Python and no standalone helper file.
+Out of scope for this SUT workbook: overuse as a column of the official SUT (it is a companion
+overlay; see overuse below); blue carbon Tables 25-32.
 
 **STECF has no EEZ field.** The three 2025 data-call workbooks were checked: fleet segment
 (`STECF_25 07_EU Fleet Economic and Transversal data_fleet segment level.xlsx`), FAO landings
@@ -210,9 +215,10 @@ GP, MQ, RE, YT, GF, MA, Azores P2/P3, and so on). `codes__regions_sub-regions` m
 FAO area and GSA. National `MS_landings` has species but no sub-region. That is why the tables
 use `sub_reg_clean` under the EEZ label, with a note.
 
-# Overuse / sustainability score (not implemented)
+# Overuse / sustainability score
 
 Do not fold this into Eq. 3 to 7. Apply it after allocation, as a last step like HICP deflation.
+It is a companion overlay, not a column of the official SUT.
 
 Source method: `reference/marine-methods.docx` chapter 4.5, and `reference/AP_Deliverable4.pdf`
 (BioMESES Deliverable 4, Peris Tamayo 2024). Wild-capture **FSI** uses FAO GFCM (Mediterranean and
@@ -226,25 +232,15 @@ Restricted to the top species with stock assessments (methods Table 19; D4 is th
 Deliverable 3). Reported at Europe, marine region, and country EEZ. Aquaculture **ASI** is a
 separate eutrophication score from EMODnet points; out of scope unless asked.
 
-`data/lookup/Overuse_Total.xlsx` is a 2018-era worked example, already multiplied through, not a
-raw score table to join blindly onto 2008-2023. Sheets: Baltic Sea, Black Sea, Med Sea, NEAO,
-Total. First column is species code (COD, ELE, HER, …); join on `species_code` plus sea region.
-Columns include Initial Score, Score, Risk level, Percentage of overuse flow, landing STECF (ton),
-Sustainable flow, Overuse, Overuse_monetary. Scores differ by sea (COD is 1 in the Baltic and 2 in
-NEAO). Species coverage differs by sea (TUR only in the Black Sea). The original processing script
-has no overuse code; those fields on the old shapefiles (`OversusTon`, `OveruseTon`, …) were a
-later QGIS join. Do not extend that DBF-truncated naming.
-
-D4 annex zips A1-A10 (CSVs plus EEZ and marine-region spatial layers) are not in this repo. EEZ
-fish-capture maps were `A6_EEZ_Fishcapture.zip`.
+`data/lookup/Overuse_Total.xlsx` is a 2018-era worked example. The processing page joins the
+integer `Score` on `species_code` plus sea and reapplies Table 18; it does not reuse the
+pre-multiplied Overuse columns. Scores differ by sea (COD is 1 in the Baltic and 2 in NEAO).
+Species coverage differs by sea (TUR only in the Black Sea). Scores are held constant across
+2008-2023 until a new stock-assessment vintage arrives. D4 annex zips A1-A10 are not in this repo.
 
 # Open work
 
-1. Confirm the 2008 base year with the client; switch `base_year` if they prefer 2023 constant prices.
-2. Resolve the open items above: `subinvest`, `sa11.1` and `sa11.2`, the duplicate species codes,
-   and confirm that `Type` and `Type_1` in the published tables correspond to our `fish_type` and
-   `species_group`.
-3. Rebuild `fish_provisioning_results.xlsx` as the report SUTs (see SUT Excel deliverable). Label
-   `sub_reg_clean` as EEZ on supply tables and add the explanatory note. Do not invent EEZ polygons.
-4. Wire overuse / FSI after allocation. See the overuse handover; do not start from the original
-   script.
+1. Replace the 2018 FSI scores with a year-varying stock-assessment extract when D4 annexes or a
+   new GFCM/ICES vintage arrive.
+2. Confirm whether JRC wants overuse as a dashboard tab or only as the Excel companion sheet.
+3. Blue carbon Tables 25-32 remain out of scope.
