@@ -6,6 +6,7 @@ format:
     theme:
       - cosmo
       - brand
+    css: ../../styles.css
     scrolling: true
     orientation: rows
 execute:
@@ -154,8 +155,15 @@ sut_gt <- function(tbl, title) {
     ) |>
     tab_spanner("Others", other_not_identified) |>
     fmt_number(decimals = 2) |>
+    cols_align(align = "right") |>
     tab_header(title = title) |>
     tab_stubhead(label = row_col)
+}
+
+print_gt <- function(tbl) {
+  cat('\n\n::::: {html-table-processing="none"}\n\n')
+  print(tbl)
+  cat("\n:::::\n\n")
 }
 
 print_sea_year <- function(y, sea) {
@@ -165,19 +173,19 @@ print_sea_year <- function(y, sea) {
   if (!has_rows) {
     return(invisible())
   }
-  print(sut_gt(
+  print_gt(sut_gt(
     sea_sut(y, sea, "supply", "landed_tonnes"),
     paste0(sea, " supply, physical (t), ", y)
   ))
-  print(sut_gt(
+  print_gt(sut_gt(
     sea_sut(y, sea, "use", "landed_tonnes"),
     paste0(sea, " use, physical (t), ", y)
   ))
-  print(sut_gt(
+  print_gt(sut_gt(
     sea_sut(y, sea, "supply", "revenue_thousand_eur_constant"),
     paste0(sea, " supply, thousand ", base_year, " euro, ", y)
   ))
-  print(sut_gt(
+  print_gt(sut_gt(
     sea_sut(y, sea, "use", "revenue_thousand_eur_constant"),
     paste0(sea, " use, thousand ", base_year, " euro, ", y)
   ))

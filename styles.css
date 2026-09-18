@@ -1,1 +1,11 @@
-/* css styles */
+/* gt tables in dashboards: Pandoc wraps each table's <style> in <p>, so
+   per-table alignment never applies. Align numeric cells here instead. */
+.gt_table td.gt_right,
+.gt_table th.gt_col_heading.gt_right {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.gt_table .gt_stub {
+  text-align: left !important;
+}
