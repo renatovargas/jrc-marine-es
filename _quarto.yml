@@ -12,9 +12,15 @@ project:
     - "*.qmd"
     - "!data/"
     - "!reference/"
+    # Kept in the source tree but not published for now
+    - "!documentation/methods/marine-methods/"
 
 website:
   title: "JRC Marine ES"
+  site-url: https://renatovargas.github.io/jrc-marine-es/
+  repo-url: https://github.com/renatovargas/jrc-marine-es
+  repo-branch: main
+  repo-actions: [source]
   navbar:
     left:
       - href: index.qmd
@@ -30,8 +36,6 @@ website:
       contents:
       - section: "Methods"
         contents:
-          - text: "Marine ES Methods"
-            href: documentation/methods/marine-methods/
           - text: "Marine ES Processing"
             href: documentation/methods/marine-processing/
       - section: "Data"

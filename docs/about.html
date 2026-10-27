@@ -106,10 +106,6 @@ ul.task-list li input[type="checkbox"] {
     <ul class="dropdown-menu" aria-labelledby="nav-menu-documentation">    
         <li class="dropdown-header">Methods</li>
         <li>
-    <a class="dropdown-item" href="./documentation/methods/marine-methods/">
- <span class="dropdown-text">Marine ES Methods</span></a>
-  </li>  
-        <li>
     <a class="dropdown-item" href="./documentation/methods/marine-processing/">
  <span class="dropdown-text">Marine ES Processing</span></a>
   </li>  
@@ -250,7 +246,7 @@ ul.task-list li input[type="checkbox"] {
     }
       var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
       var mailtoRegex = new RegExp(/^mailto:/);
-        var filterRegex = new RegExp('/' + window.location.host + '/');
+        var filterRegex = new RegExp("https:\/\/renatovargas\.github\.io\/jrc-marine-es\/");
       var isInternal = (href) => {
           return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
       }
@@ -582,4 +578,4 @@ ul.task-list li input[type="checkbox"] {
 
 
 
-</body></html>
+<footer class="footer"><div class="nav-footer"><div class="nav-footer-center"><div class="toc-actions"><ul><li><a href="https://github.com/renatovargas/jrc-marine-es/blob/main/about.qmd" class="toc-action"><i class="bi bi-github"></i>View source</a></li></ul></div></div></div></footer></body></html>

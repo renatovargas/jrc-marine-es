@@ -1,9 +1,19 @@
 ---
 title: "Marine Ecosystem Services Processing"
 subtitle: "Fish provisioning: annotated R processing routine"
-format: html
-toc: true
-toc-depth: 3
+format:
+  html:
+    toc: true
+    toc-depth: 3
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    keep-tex: false
+    geometry:
+      - margin=0.7in
+    fontsize: 9pt
+    code-overflow: wrap
 bibliography: processing-references.bib
 csl: ../../apa-6th-edition.csl
 execute:
@@ -17,8 +27,8 @@ This page documents the R routine that turns the Scientific, Technical and Econo
 Fisheries (STECF) extraction [@stecf2024] into the fish provisioning accounts. Fish provisioning is
 the ecosystem contribution to the growth of aquatic biomass captured in uncultivated production
 contexts [@hainesyoung2018], and it is valued here with the resource rent approach of the SEEA
-Central Framework [@un2014]. The companion page on
-[methods](../marine-methods/index.qmd) states the equations; this page restates the earlier working
+Central Framework [@un2014]. The accompanying
+methods report states the equations; this page restates the earlier working
 script in a compact, reproducible form so that the team can inspect each step, reproduce it from the
 repository alone, and reuse the parts that generalise.
 
@@ -87,6 +97,14 @@ library(sf)
 library(writexl)
 library(openxlsx2)
 library(gt)
+
+# In the PDF, every gt table uses a 7px font so wide tables fit the page
+if (knitr::is_latex_output()) {
+  gt <- function(...) {
+    gt::gt(...) |>
+      tab_options(table.font.size = px(7))
+  }
+}
 
 sf_use_s2(FALSE)
 ```
@@ -467,17 +485,23 @@ catch-all category and therefore the place where a new or misspelled STECF code 
 ```{r}
 #| label: check-unmatched
 
-landings |>
-  filter(year == reference_year, is.na(fish_type)) |>
-  distinct(species_code, species_name) |>
-  arrange(species_code) |>
-  gt()
+# Too long for the PDF page, so shown in HTML only
+if (!knitr::is_latex_output()) {
+  landings |>
+    filter(year == reference_year, is.na(fish_type)) |>
+    distinct(species_code, species_name) |>
+    arrange(species_code) |>
+    gt()
+}
 
-landings |>
-  filter(year == reference_year, species_name != species_name_lookup) |>
-  distinct(species_code, species_name, species_name_lookup) |>
-  arrange(species_code) |>
-  gt()
+# Too long for the PDF page, so shown in HTML only
+if (!knitr::is_latex_output()) {
+  landings |>
+    filter(year == reference_year, species_name != species_name_lookup) |>
+    distinct(species_code, species_name, species_name_lookup) |>
+    arrange(species_code) |>
+    gt()
+}
 
 landings |>
   filter(year == reference_year, Sea_reg == "ROW") |>
@@ -494,11 +518,14 @@ classification rules fail to place in the Mediterranean is a gap in those rules.
 #| label: check-mediterranean-coverage
 #| eval: true
 
-gsa_to_fao |>
-  harmonise_sub_reg() |>
-  mutate(assigned = assign_sea_region(sub_reg_clean)) |>
-  filter(assigned != "Mediterranean Sea") |>
-  gt()
+# Expected to be empty, and a header-only table looks broken in the PDF
+if (!knitr::is_latex_output()) {
+  gsa_to_fao |>
+    harmonise_sub_reg() |>
+    mutate(assigned = assign_sea_region(sub_reg_clean)) |>
+    filter(assigned != "Mediterranean Sea") |>
+    gt()
+}
 ```
 
 ::: {.callout-note}
@@ -1270,22 +1297,25 @@ overuse_by_sea_year <- fish_provisioning |>
     share_eur = overuse_thousand_eur / assessed_thousand_eur
   )
 
-overuse_by_sea_year |>
-  filter(year == 2018) |>
-  arrange(Sea_reg) |>
-  gt() |>
-  fmt_number(
-    c(
-      assessed_tonnes, overuse_tonnes,
-      assessed_thousand_eur, overuse_thousand_eur
-    ),
-    decimals = 2
-  ) |>
-  fmt_percent(c(share_tonnes, share_eur), decimals = 0) |>
-  tab_header(title = "Overuse overlay, assessed species only, 2018") |>
-  tab_source_note(
-    "Shares apply only to species with an FSI score in that sea. This is not a column of the official SUT. Scores are the 2018 worked example and are held constant across years until a new stock-assessment vintage arrives."
-  )
+# Does not fit the PDF page, so shown in HTML only
+if (!knitr::is_latex_output()) {
+  overuse_by_sea_year |>
+    filter(year == 2018) |>
+    arrange(Sea_reg) |>
+    gt() |>
+    fmt_number(
+      c(
+        assessed_tonnes, overuse_tonnes,
+        assessed_thousand_eur, overuse_thousand_eur
+      ),
+      decimals = 2
+    ) |>
+    fmt_percent(c(share_tonnes, share_eur), decimals = 0) |>
+    tab_header(title = "Overuse overlay, assessed species only, 2018") |>
+    tab_source_note(
+      "Shares apply only to species with an FSI score in that sea. This is not a column of the official SUT. Scores are the 2018 worked example and are held constant across years until a new stock-assessment vintage arrives."
+    )
+}
 ```
 
 # Accounting tables
@@ -1455,7 +1485,9 @@ sut_gt <- function(tbl, title, note) {
     fmt_number(decimals = 2) |>
     tab_header(title = title) |>
     tab_source_note(note) |>
-    tab_stubhead(label = row_col)
+    tab_stubhead(label = row_col) |>
+    # Ten columns overflow a portrait PDF page at the default size
+    tab_options(table.font.size = if (knitr::is_latex_output()) px(7) else NULL)
 }
 
 sut_identity <- function(supply, use) {
@@ -2165,7 +2197,16 @@ tibble(
     file.path("../../../data/outputs/gis", "fish_provisioning.gpkg")
   )
 ) |>
-  mutate(Download = sprintf("[%s](%s)", File, Path)) |>
+  mutate(
+    Download = if (knitr::is_latex_output()) {
+      sprintf("[%s](%s)", File, Path)
+    } else {
+      sprintf(
+        '<a class="btn btn-primary btn-sm" href="%s" download>%s</a>',
+        Path, File
+      )
+    }
+  ) |>
   select(Download, Description) |>
   gt() |>
   fmt_markdown(Download) |>
