@@ -28,6 +28,12 @@ landings in kilograms and euro. Kilograms exist only in the landings file; incom
 exist only in `FS data`. The conversion is documented on the
 [STECF Fleet Segment Data](../../FS-landings-data/) page.
 
+Years 2002 to 2007 come from a second, older source: the 2011 Data Collection Framework (DCF) data
+call, supplied by JRC in October 2026 as `data/dcf/DCF_2011_fleet_economic_and_landings_2002-2010.xlsx`.
+That workbook has a different fleet definition and a different economic variable, so it is
+prepared in its own section, [Extending the series back to 2002](#sec-dcf-extension),
+and joins the pipeline just before the allocation.
+
 The routine has three components, and they run in this order because the second depends on the
 first:
 
@@ -88,18 +94,21 @@ sf_use_s2(FALSE)
 Every input and output path is declared once, at the top, so that a reader can see the full data
 footprint of the routine without scrolling. `reference_year` is the latest fully valuable year. The
 two year filters use `year <= reference_year` rather than `year == reference_year`; `year` is
-already part of every grouping key and every gap-filling join, so the result is a 2008 to 2023
-panel with no cross-year contamination.
+already part of every grouping key and every gap-filling join, so the result is a 2002 to 2023
+panel with no cross-year contamination. `dcf_years` are the years taken from the 2011 DCF data
+call; every later year comes from STECF.
 
 ```{r}
 #| label: parameters
 
 reference_year <- 2023
 base_year <- 2010
+dcf_years <- 2002:2007
 
 # Inputs
 stecf_economic_file <- "data/stecf/FS_data_2008-2024.RDS"
 stecf_landings_file <- "data/stecf/FS_landings_FAO_2008-2024.RDS"
+dcf_file <- "data/dcf/DCF_2011_fleet_economic_and_landings_2002-2010.xlsx"
 country_codes_file <- "data/stecf/country_codes.csv"
 species_lookup_file <- "data/lookup/3.classification_vs_OFFICIAL.xlsx"
 gsa_lookup_file <- "data/lookup/Link_GSA_Marine regions_Mediterranean Sea.xlsx"
@@ -568,21 +577,377 @@ stopifnot(
 )
 ```
 
+# Extending the series back to 2002 {#sec-dcf-extension}
+
+The STECF 2025 data call starts in 2008. In October 2026 JRC supplied the landings and economic
+tables of the 2011 DCF data call, which cover 2002 to 2010, together with a short description by
+Domenico. The workbook and the description are kept in `data/dcf/`. This section prepares those
+tables so that they look like the STECF tables to the allocation, which then runs once over the
+whole 2002 to 2023 panel with no change to its logic.
+
+Only 2002 to 2007 are taken from the 2011 call. From 2008 onward the STECF 2025 call stays the
+source, for three reasons. It is a later revision of the same years. Its coverage is wider, as the
+overlap check below shows. Keeping it means the published 2008 to 2023 results do not move. The
+2011 workbook does contain 2010, but its economic sheet holds almost nothing for that year and its
+own notes flag 2010 as provisional.
+
+::: {.callout-important}
+## What differs in the 2011 data call
+
+- **No fleet segment code.** Following Domenico's description, a fleet is the landing country plus
+  the vessel length class, for example `POL VL1224`. This is coarser than the STECF `fs_name`,
+  which also carries gear and supra-region.
+- **Operating cash flow is the net economic result.** The 2011 call has no separate income and
+  expenditure items before 2008, so Eq. 3 is replaced by the reported operating cash flow (OCF), as
+  Domenico instructed. OCF does not deduct consumption of fixed capital or unpaid labour, which
+  the STECF `Expenditure` group does. Rent for 2002 to 2007 is therefore higher than a like-for-like
+  measure would give; the overlap check below sizes the gap.
+- **Coarser fishing areas.** Much of the catch is reported at FAO area level (`27.7`, `27.4`,
+  `27.3`) rather than at division level, and the Mediterranean is reported in FAO divisions
+  (`37.1.2`, `37.2.1`) rather than GFCM sub-areas. Supply tables for those years have coarser rows,
+  and the division map covers less of the catch.
+- **United Kingdom.** The 2011 call includes the United Kingdom; the STECF 2025 call does not. Its
+  landings and fleets are dropped so that every year covers the same Member States.
+- **Small segments.** The workbook notes say that segments of fewer than 10 vessels are excluded.
+:::
+
+## Loading the workbook
+
+Two of the five sheets are used. The column names are renamed to the STECF names on load, so that
+the rest of the routine reads the same way for both sources.
+
+```{r}
+#| label: dcf-load
+
+dcf_landings_raw <- read_excel(dcf_file, sheet = "DCF EU fleet landings 2002-2010") |>
+  rename(
+    country_code = `MEMBER STATE`, year = YEAR, species_code = SPECIES,
+    sub_reg = `SUB REGION`, fishing_tech = `FISHING TECH`,
+    vessel_length = `VESSEL LENGTH`, variable = VARIABLE, value = VALUE
+  )
+
+dcf_economic_raw <- read_excel(dcf_file, sheet = "EU fleet economic performance") |>
+  rename(
+    country_code = `MEMBER STATE`, year = YEAR, supra_reg = `SUPRA REGION`,
+    fishing_tech = `GEAR TYPE`, vessel_length = `LENGTH CLASS`,
+    variable = VARIABLE, value = VALUE
+  )
+
+stecf_countries <- sort(unique(landings$country_code))
+```
+
+## Net economic result by fleet
+
+The economic sheet has one row per country, year, gear and length class. Operating cash flow is
+summed over gears to give one net result per country and length class, which is the fleet as
+Domenico defined it. Rows labelled as inactive gear are removed, as on the STECF side. The function
+takes the years as an argument because the overlap check below calls it again for 2008 and 2009.
+
+```{r}
+#| label: dcf-fleet-net
+
+dcf_fleet_net <- function(data, years) {
+  data |>
+    filter(
+      year %in% years,
+      variable == "Operating cash flow (OCF)",
+      !str_to_upper(fishing_tech) %in% c("INACTIVE", "NONACTIVE"),
+      !is.na(value),
+      country_code %in% stecf_countries
+    ) |>
+    summarise(total_net = sum(value), .by = c(year, country_code, vessel_length)) |>
+    mutate(fs_name = paste(country_code, vessel_length))
+}
+
+fleet_net_dcf <- dcf_fleet_net(dcf_economic_raw, dcf_years)
+
+fleet_net_dcf_positive <- fleet_net_dcf |>
+  filter(total_net > 0) |>
+  select(year, fs_name, total_net)
+```
+
+Box 2 applies unchanged. A fleet with a negative or zero operating cash flow carries no valuation,
+and its landings are valued later from average prices.
+
+## Landings
+
+Landed weight is `totwghtlandg`, in kilograms. The unit is confirmed against STECF 2025: for Finland
+and Latvia in 2008 the two calls agree to the kilogram. Rows with a zero or negative weight are
+removed. The seven negative weights in the workbook all fall in 2008 and 2009, outside the years
+used. Sub-region codes are upper case in this workbook (`27.9.A`), so they are lowered before the
+shared whitespace strip and recode.
+
+Two groups of rows are removed from the recode table for this source. The four rows that turn FAO
+Mediterranean divisions into GFCM sub-areas are removed because the 2011 call reports the whole
+Mediterranean in FAO divisions; recoding three divisions to single sub-areas while the others stay
+as divisions would mix two systems in one year. The `27.8` to `27.8.a` row is removed because in
+the 2011 call `27.8` is the main reporting code for the Bay of Biscay, about 180,000 tonnes a year;
+in STECF 2025 it is a residual of a few tonnes.
+
+```{r}
+#| label: dcf-recodes
+
+sub_reg_recodes_dcf <- sub_reg_recodes |>
+  filter(!str_starts(from, fixed("37.")), from != "27.8")
+```
+
+`assign_sea_region()` recognises fine division codes only, so it would send the coarse codes of the
+2011 call to ROW. The rule below assigns by FAO major area instead. Area 27 is NEAO, except its
+Baltic part. Area 37 is the Mediterranean, except subarea `37.4`, which is the Black Sea. `27.3`
+covers both the Baltic and the Skagerrak and Kattegat; in this workbook it is reported by Poland,
+Latvia, Estonia and Lithuania, almost all of it sprat, herring and cod, so it is assigned to the
+Baltic Sea.
+
+```{r}
+#| label: fn-assign-sea-region-dcf
+
+assign_sea_region_dcf <- function(sub_reg_clean) {
+  case_when(
+    sub_reg_clean %in% c("0", "0.0") ~ "unknown",
+    sub_reg_clean == "27.3" |
+      str_starts(sub_reg_clean, fixed("27.3.d")) ~ "Baltic Sea",
+    str_detect(sub_reg_clean, "^27(\\.|$)") ~ "NEAO",
+    str_starts(sub_reg_clean, fixed("37.4")) ~ "Black Sea",
+    str_detect(sub_reg_clean, "^37(\\.|$)") ~ "Mediterranean Sea",
+    .default = "ROW"
+  )
+}
+```
+
+The 2011 call reports species by code only. Names are taken from STECF 2025, using the most recent
+name for each code, then from the classification workbook, and the code itself as a last resort.
+Three key combinations for Greece in 2003 and 2005 appear twice with different weights; both rows
+are kept, which sums them, as the allocation does for any two records of the same fleet.
+
+```{r}
+#| label: dcf-landings
+
+clean_dcf_landings <- function(data, years) {
+  data |>
+    filter(
+      year %in% years,
+      variable == "totwghtlandg",
+      value > 0,
+      country_code %in% stecf_countries
+    ) |>
+    transmute(
+      year, country_code, vessel_length, species_code,
+      fs_name = paste(country_code, vessel_length),
+      sub_reg = str_to_lower(sub_reg),
+      landed_kg = value
+    ) |>
+    harmonise_sub_reg(recodes = sub_reg_recodes_dcf) |>
+    mutate(Sea_reg = assign_sea_region_dcf(sub_reg_clean))
+}
+
+stecf_species_names <- landings |>
+  filter(!is.na(species_name)) |>
+  arrange(desc(year)) |>
+  distinct(species_code, species_name)  |>
+  distinct(species_code, .keep_all = TRUE)
+
+landings_dcf <- dcf_landings_raw |>
+  clean_dcf_landings(dcf_years) |>
+  left_join(stecf_species_names, by = "species_code", relationship = "many-to-one") |>
+  left_join(species_types, by = join_by(species_code), relationship = "many-to-one") |>
+  mutate(species_name = coalesce(species_name, species_name_lookup, species_code))
+```
+
+## Checks on the 2011 data call
+
+The first check guards the sea rule. Wherever `assign_sea_region()` places a code in a European
+sea, the rule for the 2011 call must agree; the two may only differ on codes the STECF rule would
+leave in ROW. The table lists those codes and the tonnage they bring into the European seas.
+
+```{r}
+#| label: check-dcf-sea-rule
+
+dcf_sea_rule <- landings_dcf |>
+  summarise(landed_tonnes = sum(landed_kg) / 1000, .by = c(sub_reg_clean, Sea_reg)) |>
+  mutate(stecf_rule = assign_sea_region(sub_reg_clean))
+
+stopifnot(
+  "The DCF sea rule may only differ from the STECF rule on codes the STECF rule sends to ROW" =
+    with(dcf_sea_rule, all(Sea_reg == stecf_rule | stecf_rule == "ROW"))
+)
+
+dcf_sea_rule |>
+  filter(Sea_reg != stecf_rule) |>
+  arrange(Sea_reg, desc(landed_tonnes)) |>
+  select(sub_reg_clean, Sea_reg, landed_tonnes) |>
+  gt() |>
+  fmt_number(landed_tonnes, decimals = 0) |>
+  cols_label(
+    sub_reg_clean = "Sub-region",
+    Sea_reg = "Assigned to",
+    landed_tonnes = "Tonnes, 2002 to 2007"
+  )
+```
+
+The second check shows what was left out because the country is not in the STECF 2025 panel.
+
+```{r}
+#| label: check-dcf-countries
+
+dcf_landings_raw |>
+  filter(year %in% dcf_years, variable == "totwghtlandg", value > 0) |>
+  summarise(landed_tonnes = sum(value) / 1000, .by = c(year, country_code)) |>
+  mutate(share_pct = 100 * landed_tonnes / sum(landed_tonnes), .by = year) |>
+  filter(!country_code %in% stecf_countries) |>
+  arrange(country_code, year) |>
+  gt() |>
+  fmt_number(landed_tonnes, decimals = 0) |>
+  fmt_number(share_pct, decimals = 1) |>
+  cols_label(
+    country_code = "Country", year = "Year",
+    landed_tonnes = "Tonnes dropped", share_pct = "Share of the year (%)"
+  )
+```
+
+The third check shows how much of the catch finds a fleet with a positive operating cash flow, and
+therefore carries observed rent, and how much goes to the Box 2 gap filling. It also lists the
+species codes with no typology in the classification workbook.
+
+```{r}
+#| label: check-dcf-match
+
+landings_dcf |>
+  left_join(fleet_net_dcf, by = join_by(year, fs_name)) |>
+  summarise(
+    landed_tonnes = sum(landed_kg) / 1000,
+    with_ocf_pct = 100 * sum(landed_kg[!is.na(total_net)]) / sum(landed_kg),
+    positive_ocf_pct = 100 * sum(landed_kg[total_net > 0], na.rm = TRUE) / sum(landed_kg),
+    .by = year
+  ) |>
+  arrange(year) |>
+  gt() |>
+  fmt_number(landed_tonnes, decimals = 0) |>
+  fmt_number(c(with_ocf_pct, positive_ocf_pct), decimals = 1) |>
+  cols_label(
+    year = "Year",
+    landed_tonnes = "Tonnes",
+    with_ocf_pct = "Fleet has OCF (%)",
+    positive_ocf_pct = "Fleet OCF positive (%)"
+  )
+
+landings_dcf |>
+  filter(is.na(fish_type)) |>
+  summarise(landed_tonnes = sum(landed_kg) / 1000, .by = species_code) |>
+  slice_max(landed_tonnes, n = 10) |>
+  gt() |>
+  fmt_number(landed_tonnes, decimals = 0) |>
+  cols_label(species_code = "Species code", landed_tonnes = "Tonnes, 2002 to 2007")
+```
+
+## Overlap with STECF in 2008 and 2009
+
+Both calls report 2008 and 2009, which is the only place the two sources can be compared directly.
+The same preparation is run on the 2011 call for those two years and set against STECF 2025.
+
+```{r}
+#| label: check-dcf-overlap
+
+overlap_years <- 2008:2009
+
+dcf_landings_raw |>
+  clean_dcf_landings(overlap_years) |>
+  summarise(dcf_tonnes = sum(landed_kg) / 1000, .by = c(year, Sea_reg)) |>
+  left_join(
+    landings |>
+      filter(year %in% overlap_years) |>
+      summarise(stecf_tonnes = sum(landed_kg) / 1000, .by = c(year, Sea_reg)),
+    by = join_by(year, Sea_reg)
+  ) |>
+  mutate(ratio = dcf_tonnes / stecf_tonnes) |>
+  arrange(year, Sea_reg) |>
+  gt() |>
+  fmt_number(c(dcf_tonnes, stecf_tonnes), decimals = 0) |>
+  fmt_number(ratio, decimals = 2) |>
+  cols_label(
+    year = "Year", Sea_reg = "Sea region",
+    dcf_tonnes = "2011 call (t)", stecf_tonnes = "STECF 2025 (t)",
+    ratio = "Ratio"
+  )
+
+stecf_items_not_in_ocf <- stecf_economic |>
+  filter(
+    year %in% overlap_years,
+    variable_code %in% c("totdepcost", "totunpaidlab")
+  ) |>
+  summarise(items_not_in_ocf = sum(value, na.rm = TRUE), .by = year)
+
+dcf_fleet_net(dcf_economic_raw, overlap_years) |>
+  summarise(
+    ocf = sum(total_net),
+    ocf_positive = sum(total_net[total_net > 0]),
+    .by = year
+  ) |>
+  left_join(
+    fleet_net |>
+      summarise(
+        stecf_net = sum(total_net),
+        stecf_net_positive = sum(total_net[total_net > 0]),
+        .by = year
+      ),
+    by = "year"
+  ) |>
+  left_join(stecf_items_not_in_ocf, by = "year") |>
+  mutate(
+    stecf_net_ocf_basis = stecf_net + items_not_in_ocf,
+    across(-year, \(x) x / 1e6)
+  ) |>
+  select(year, ocf, stecf_net_ocf_basis, stecf_net, ocf_positive, stecf_net_positive) |>
+  gt() |>
+  fmt_number(-year, decimals = 0) |>
+  cols_label(
+    year = "Year",
+    ocf = "2011 call OCF",
+    stecf_net_ocf_basis = "STECF net before capital and unpaid labour",
+    stecf_net = "STECF net (Eq. 3)",
+    ocf_positive = "OCF, positive fleets",
+    stecf_net_positive = "STECF net, positive fleets"
+  ) |>
+  tab_header(title = "Net economic result, million nominal euro")
+```
+
+For landings, the 2011 call is 4 to 13 percent below STECF 2025 in the Baltic and NEAO, and about
+70 percent below in ROW, where the distant-water fleets were poorly covered at the time. The
+Mediterranean is higher in 2008 only because Greece reported to the 2011 call and is missing from
+STECF 2025 for that year. The 2002 to 2007 tonnage is therefore a lower bound, mostly in ROW, and
+part of the step between 2007 and 2008 is the change of source.
+
+For the economic result the break is larger. In 2008 the fleets with a positive operating cash flow
+add up to about 1.7 billion euro, against about 0.5 billion euro for fleets with a positive Eq. 3
+net result. Part of the gap is the two cost items OCF leaves out; part is the coarser fleet
+definition, which nets loss-making gears against profitable ones inside a country and length
+class. Resource rent for 2002 to 2007 is therefore an upper bound relative to the 2008 to 2023
+series, and the two periods should not be compared as one continuous series without that caveat.
+
+The largest code without a typology is `PIA`, about 150,000 tonnes over the six years. Those
+landings appear in the tables under "Not identified", as unmatched codes do in the STECF years.
+
+## Joining the two sources
+
+The 2002 to 2007 landings and fleet results are appended to the STECF ones in the next chunk, before
+the allocation. Every grouping key and every gap-filling join contains `year`, so the two sources
+never mix: a 2005 record can only receive a 2005 fleet result or a 2005 average price.
+
 # Resource rent allocation
 
 ## Matching landings to fleet economics
 
 Landings and fleet economics meet on the fleet segment name and the year. The join is
-many-to-one because a fleet has one net result but many landing records. Records that find no
+many-to-one because a fleet has one net result but many landing records. The STECF and 2011 DCF
+inputs are appended here, so everything below runs once over 2002 to 2023. Records that find no
 positive net result are the gap set of Box 2; they keep their quantities and are valued later from
 average prices.
 
 ```{r}
 #| label: landings-matched
 
-landings_matched <- landings |>
+landings_matched <- bind_rows(landings, landings_dcf) |>
   left_join(
-    fleet_net_positive,
+    bind_rows(fleet_net_positive, fleet_net_dcf_positive),
     by = join_by(fs_name, year),
     relationship = "many-to-one"
   )
@@ -750,7 +1115,8 @@ fleet. The final price is the revenue-weighted average that results, and the rep
 tonnes and thousands of euro.
 
 `price_basis` is collapsed into a readable label rather than dropped, so each row of the published
-table carries the provenance of its own valuation. Note that both unit conversions are applied to
+table carries the provenance of its own valuation. `data_source` does the same for the data call
+each year comes from. Note that both unit conversions are applied to
 the aggregated columns; the original script converted quantities from the aggregate but converted
 revenue from the pre-aggregation column, so the two published units were computed on different
 bases.
@@ -770,7 +1136,10 @@ fish_provisioning <- accounting_records |>
       landed_kg > 0, revenue_eur / landed_kg, NA_real_
     ),
     landed_tonnes = landed_kg / 1000,
-    revenue_thousand_eur = revenue_eur / 1000
+    revenue_thousand_eur = revenue_eur / 1000,
+    data_source = if_else(
+      year %in% dcf_years, "DCF 2011 data call", "STECF 2025 data call"
+    )
   ) |>
   arrange(year, Sea_reg, country_code, species_code)
 ```
@@ -1369,7 +1738,12 @@ readme_notes <- c(
   "Supply Total equals use Total at every grain; see the Checks sheet.",
   "Overuse is a sustainability overlay on assessed species only. It is not a column of the official SUT. Scores come from the 2018 FSI worked example and are held constant across years.",
   "The machine-readable panel is fish_provisioning.xlsx / fish_provisioning.RDS.",
-  "Source: STECF 2025 Fleet Economic data call."
+  "Source: STECF 2025 Fleet Economic data call for 2008 to 2023.",
+  paste(
+    "Source for 2002 to 2007: 2011 DCF data call. Fleets are country plus vessel length,",
+    "the net result is operating cash flow, the United Kingdom is excluded, and fishing areas",
+    "are coarser (Mediterranean in FAO divisions). Compare across 2007 and 2008 with care."
+  )
 )
 wb <- wb_add_data(wb, "Readme", x = readme_notes, col_names = FALSE)
 wb <- wb_add_cell_style(
@@ -1775,7 +2149,7 @@ tibble(
     "fish_provisioning.gpkg"
   ),
   Description = c(
-    "Species-country-sub-region panel, 2008 to 2023, including 2010-euro rent",
+    "Species-country-sub-region panel, 2002 to 2023, including 2010-euro rent",
     "The same panel as a single Excel sheet",
     "Report-style SUTs, one sheet per year: Europe Tables 2 to 9 and nested Tables 10 to 13 per sea, in tonnes, nominal euro and 2010 euro",
     "Observed resource-rent prices used in gap filling",
@@ -1824,6 +2198,9 @@ Domenico's answers to the open points, and what the routine now does.
 - **Overuse.** Wired after allocation from the 2018 FSI scores. It is a companion overlay, not a
   column of the official SUT. Scores are held constant across years until a new stock-assessment
   vintage arrives.
+- **2002 to 2007 (October 2026).** Added from the 2011 DCF data call, with fleets defined as
+  country plus vessel length and operating cash flow as the net result, following Domenico's
+  description of the dataset. See [Extending the series back to 2002](#sec-dcf-extension).
 
 # References
 

@@ -1,6 +1,6 @@
 ---
 title: "Fish provisioning"
-subtitle: "EU marine ecosystem service accounts, 2008 to 2023"
+subtitle: "EU marine ecosystem service accounts, 2002 to 2023"
 format:
   dashboard:
     theme:
@@ -316,6 +316,13 @@ shows physical tonnes and 2010 euro.
 The allocation itself stays in nominal euro. ROW is rest of world.
 :::
 
+::: {.card}
+**2002 to 2007 come from an older data call.** Those years use the 2011 DCF data call, with
+operating cash flow as the net result and coarser fleets and fishing areas. Their rent is an upper
+bound and their tonnage a lower bound relative to 2008 onward, which comes from STECF 2025.
+The United Kingdom is excluded throughout.
+:::
+
 # Supply and use
 
 ## Row {height="88%"}
@@ -397,12 +404,17 @@ choropleth(macro_2023, price_eur_per_kg_constant, "2010 €/kg") +
 
 by_sea_year |>
   ggplot(aes(year, landed_tonnes, colour = Sea_reg)) +
+  geom_vline(xintercept = 2007.5, linetype = "dashed", colour = "grey60") +
   geom_line(linewidth = 0.9) +
   geom_point(size = 1.6) +
   scale_y_continuous(labels = scales::label_comma()) +
-  scale_x_continuous(breaks = seq(2008, 2023, by = 2)) +
+  scale_x_continuous(breaks = seq(2002, 2023, by = 3)) +
   scale_colour_brewer(palette = "Dark2", name = NULL) +
-  labs(x = NULL, y = "Tonnes") +
+  labs(
+    x = NULL,
+    y = "Tonnes",
+    caption = "Dashed line: 2002 to 2007 from the 2011 DCF data call, 2008 onward from STECF 2025."
+  ) +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
@@ -416,15 +428,19 @@ by_sea_year |>
 
 by_sea_year |>
   ggplot(aes(year, revenue_thousand_eur_constant, colour = Sea_reg)) +
+  geom_vline(xintercept = 2007.5, linetype = "dashed", colour = "grey60") +
   geom_line(linewidth = 0.9) +
   geom_point(size = 1.6) +
   scale_y_continuous(labels = scales::label_comma()) +
-  scale_x_continuous(breaks = seq(2008, 2023, by = 2)) +
+  scale_x_continuous(breaks = seq(2002, 2023, by = 3)) +
   scale_colour_brewer(palette = "Dark2", name = NULL) +
   labs(
     x = NULL,
     y = "Thousand 2010 €",
-    caption = "Constant 2010 euro, Eurostat HICP for EU-27."
+    caption = paste(
+      "Constant 2010 euro, Eurostat HICP for EU-27. Dashed line: 2002 to 2007 use operating",
+      "cash flow from the 2011 DCF data call and are an upper bound."
+    )
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
